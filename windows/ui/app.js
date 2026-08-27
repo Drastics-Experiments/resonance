@@ -7,6 +7,7 @@ import {
   canonicalYouTubeSourcePageURL,
   catalogRequestCanApply,
   clientConfigRenewalDelay,
+  createClientUUID,
   createEmptyState,
   downloadedSongMetadataRefreshSource,
   exactYouTubeSourcePageURL,
@@ -2404,7 +2405,7 @@ function beginListeningSession() {
   const activeEntry = state.listeningHistory.find((entry) => entry.id === activeListeningEntryID);
   if (activeEntry?.trackID === historyTrackID) return;
   const entry = {
-    id: crypto.randomUUID(),
+    id: createClientUUID(),
     trackID: historyTrackID,
     profileID: track.transientStream ? track.syncProfileID : activeProfileID(),
     serverOrigin: track.transientStream
@@ -2859,6 +2860,19 @@ function releaseServerStreamCapability(stream) {
   return api.releaseServerStream(stream.url).catch(() => false);
 }
 
+function validServerStreamURL(value) {
+  if (api.runtime !== "browser") return /^resonance-stream:\/\/media\/[a-f0-9]{64}$/.test(value);
+  try {
+    const url = new URL(value, window.location.href);
+    return url.origin === window.location.origin
+      && /^\/api\/browser\/streams\/[a-f0-9]{64}$/.test(url.pathname)
+      && !url.search
+      && !url.hash;
+  } catch {
+    return false;
+  }
+}
+
 function releaseActiveServerStream({ stopPlayback = false, invalidatePending = true } = {}) {
   if (invalidatePending) serverStreamRequestGeneration += 1;
   const stream = activeServerStream;
@@ -2924,7 +2938,7 @@ async function playRemoteStream(song) {
       || !profileContextIsCurrent(context)
       || currentServerTransferModes().downloadMode !== "stream_only";
     if (stale
-        || !/^resonance-stream:\/\/media\/[a-f0-9]{64}$/.test(streamURL)
+        || !validServerStreamURL(streamURL)
         || !/^remote-stream:[a-f0-9]{64}$/.test(historyTrackID)) {
       if (streamURL) await api.releaseServerStream(streamURL).catch(() => false);
       if (!stale) throw new Error("The server returned an invalid stream capability.");
@@ -2933,7 +2947,7 @@ async function playRemoteStream(song) {
     const previousStream = activeServerStream;
     const duration = remoteMediaDuration(song.duration_seconds ?? song.duration) || 0;
     const track = Object.freeze({
-      id: `stream:${crypto.randomUUID()}`,
+      id: `stream:${createClientUUID()}`,
       remoteID: song.id,
       title: song.title || song.name || "Untitled",
       artist: song.artist || "Unknown Artist",
@@ -3920,7 +3934,7 @@ function upsertImportedPlaylist(name, trackIDs) {
     !item.isSystem && item.name.localeCompare(cleanName, undefined, { sensitivity: "accent" }) === 0);
   if (!playlist) {
     playlist = {
-      id: crypto.randomUUID().toLocaleLowerCase(),
+      id: createClientUUID().toLocaleLowerCase(),
       name: cleanName,
       trackIDs: [],
       remoteSongIDs: [],
@@ -4539,7 +4553,7 @@ function serverUploadManifestFromResult(result, context, source) {
   if (!uploaded.length && !failed.length) return null;
   const now = new Date().toISOString();
   return normalizeServerUploadManifest({
-    id: crypto.randomUUID(),
+    id: createClientUUID(),
     serverOrigin: normalizedServerOrigin(context.serverURL),
     profileID: context.profileID,
     source,
@@ -5293,10 +5307,11 @@ function bindServerSettingsControls() {
       const status = $("#serverSettingsStatus");
       try {
         status.textContent = "Opening secure sign-in…";
-        await api.signInAccount({
+        const result = await api.signInAccount({
           provider: button.dataset.authProvider,
           profileID: activeProfileID(),
         });
+        if (result?.ok === false) throw new Error(result.error?.message || "Sign-in is unavailable.");
         status.textContent = "Complete sign-in in your web browser.";
       } catch (error) {
         status.textContent = error.message || "Sign-in could not be started.";
@@ -6230,15 +6245,12 @@ function updateLocalImportSyncForSelection({ preserveChecked = false } = {}) {
   const row = $("#localImportSyncRow");
   if (!preserveChecked) {
     sync.checked = true;
-    if (api["browser"]) sync.checked = false;
   }
   sync.disabled = serverBacked;
   syncTransitionToggle(sync);
   row.classList.toggle("disabled", serverBacked);
   row.title = serverBacked
     ? "This source is already saved to the active server profile."
-      : api["browser"]
-        ? "Browser test mode keeps imports on this device fixture."
       : canSync
       ? "Upload a copy to the active server profile after downloading."
       : "Sign in to your Resonance account before importing to upload this copy.";
@@ -9161,11 +9173,6 @@ document.querySelectorAll("dialog.t-modal").forEach((dialog) => {
     dialog.classList.remove("is-open", "is-closing");
   });
 });
-if (api["browser"]) {
-  $("#browserPreviewBar").hidden = false;
-  $("#resetBrowserPreview").onclick = () => api.resetBrowserState();
-}
-
 $("#nowPlayingDialog").addEventListener("animationend", (event) => {
   if (event.target === $("#nowPlayingDialog") && event.animationName === "full-player-slide-out") {
     finishNowPlayingClose();
@@ -9577,7 +9584,7 @@ $("#playlistForm").onsubmit = async (event) => {
   const name = $("#playlistName").value.trim();
   if (!name) return;
   const playlist = {
-    id: crypto.randomUUID().toLocaleLowerCase(),
+    id: createClientUUID().toLocaleLowerCase(),
     name,
     trackIDs: pendingPlaylistTrackID ? [pendingPlaylistTrackID] : [],
     remoteSongIDs: [],

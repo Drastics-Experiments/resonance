@@ -70,8 +70,8 @@ test("browser bridge keeps credentials out of browser persistence", async () => 
 
   const serializedStorage = JSON.stringify(storage.entries());
   assert.doesNotMatch(serializedStorage, /should-not-be-stored/);
-  assert.equal(api.browser, true);
-  assert.equal(api.browserRuntimeVersion, "1");
+  assert.equal(api.runtime, "browser");
+  assert.equal(api.browser, undefined);
 });
 
 test("shared desktop client-config audiences distinguish Windows and macOS explicitly", () => {

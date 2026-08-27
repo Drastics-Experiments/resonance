@@ -1,416 +1,375 @@
-import { createEmptyState, SAFE_CLIENT_CONFIG } from "./core.js";
+import { createClientUUID, createEmptyState } from "./core.js";
 
-/**
- * Browser-only renderer bridge.
- *
- * Electron supplies the real bridge from preload.cjs. A normal browser does
- * not, but the renderer should still be useful for visual and interaction
- * testing. This module provides deterministic local fixtures and safe no-op
- * implementations for the main-process capabilities. It is intentionally
- * loaded before app.js and leaves an existing Electron bridge untouched.
- */
-
-const BROWSER_STATE_KEY = "resonance.browser.state.v1";
-const BROWSER_RUNTIME_VERSION = "1";
-const BROWSER_STATE_RESET_EVENT = "resonance:browser-state-reset";
-const DEFAULT_CAPACITY_BYTES = 64 * 1024 * 1024 * 1024;
-const FIXTURE_TRACK_DURATIONS = Object.freeze([186, 242, 205, 278, 194, 221]);
-const browserAudioURLs = new Map();
+const BROWSER_LIBRARY_KEY = "resonance.browser.library.v2";
+const STREAM_ONLY_CONFIG_LIFETIME_MS = 10 * 60 * 1000;
 
 function clone(value) {
   if (typeof structuredClone === "function") return structuredClone(value);
   return JSON.parse(JSON.stringify(value));
 }
 
-function browserArtwork(title, first, second) {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="${first}"/><stop offset="1" stop-color="${second}"/></linearGradient></defs><rect width="640" height="640" rx="96" fill="url(#g)"/><circle cx="510" cy="120" r="150" fill="#ffffff" opacity=".1"/><path d="M150 422c85-103 169-152 252-148 29 2 55 11 78 26v93c-29-18-58-26-87-24-63 4-123 48-181 132z" fill="#fff" opacity=".9"/><text x="56" y="112" fill="#fff" font-family="system-ui,sans-serif" font-size="34" font-weight="700" opacity=".85">${title}</text></svg>`;
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
-}
-
-function createBrowserAudioURL(durationSeconds = 1) {
-  const duration = Math.max(1, Math.round(Number(durationSeconds) || 1));
-  if (browserAudioURLs.has(duration)) return browserAudioURLs.get(duration);
-  if (typeof Blob !== "function" || typeof URL === "undefined" || typeof URL.createObjectURL !== "function") return "";
-  try {
-    // A valid silent WAV keeps transport controls testable without fetching or
-    // embedding a copyrighted media fixture. Its duration must match the
-    // metadata below: app.js correctly trusts playable media metadata over a
-    // stale stored value, so a one-second fixture would rewrite every track
-    // to 0:01 as soon as it was played.
-    // 4 kHz keeps the complete six-track fixture around 11 MB while still
-    // using a broadly supported PCM WAV format.
-    const sampleRate = 4_000;
-    const sampleCount = sampleRate * duration;
-    const bytes = new Uint8Array(44 + sampleCount * 2);
-    const view = new DataView(bytes.buffer);
-    const writeText = (offset, value) => {
-      for (let index = 0; index < value.length; index += 1) bytes[offset + index] = value.charCodeAt(index);
-    };
-    writeText(0, "RIFF");
-    view.setUint32(4, bytes.length - 8, true);
-    writeText(8, "WAVEfmt ");
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeText(36, "data");
-    view.setUint32(40, sampleCount * 2, true);
-    const audioURL = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
-    browserAudioURLs.set(duration, audioURL);
-    return audioURL;
-  } catch {
-    return "";
-  }
-}
-
-function fixtureAudioURLs() {
-  return FIXTURE_TRACK_DURATIONS.map((duration) => createBrowserAudioURL(duration));
-}
-
-function sampleTracks(audioURLs) {
-  const urls = Array.isArray(audioURLs) ? audioURLs : [audioURLs];
-  const now = new Date();
-  const artwork = [
-    browserArtwork("MORNING", "#5b21b6", "#0891b2"),
-    browserArtwork("NIGHT", "#be123c", "#7c3aed"),
-    browserArtwork("GLOW", "#0369a1", "#0f766e"),
-    browserArtwork("DRIFT", "#c2410c", "#7e22ce"),
-    browserArtwork("FIELD", "#166534", "#0f766e"),
-    browserArtwork("LIGHT", "#a16207", "#c2410c"),
-  ];
-  const entries = [
-    ["browser-morning", "Morning Signal", "Resonance Ensemble", "First Light", 186, 1_800_000, "local"],
-    ["browser-night", "Night Drive", "Low Frequency Club", "After Hours", 242, 2_300_000, "local"],
-    ["browser-glow", "Soft Focus", "Mira Vale", "Luminous", 205, 2_000_000, "local"],
-    ["browser-drift", "Drift State", "Kite Theory", "Parallel Lines", 278, 2_700_000, "local"],
-    ["browser-field", "Open Field", "Northline", "Small Hours", 194, 1_900_000, "local"],
-    ["browser-light", "Late Light", "The Quiet Hours", "Signal Bloom", 221, 2_100_000, "local"],
-  ];
-  return entries.map(([id, title, artist, album, duration, size, storageLocation], index) => ({
-    id,
-    title,
-    artist,
-    album,
-    duration,
-    size,
-    // Browser fixtures have no real filesystem location. Leaving filePath
-    // empty keeps the desktop-only "Show in folder" action out of the
-    // browser context menu instead of exposing a no-op action.
-    filePath: null,
-    fileUrl: urls[index] || urls[0] || "",
-    sourceURL: `https://example.com/resonance/${id}`,
-    artwork: artwork[index],
-    artworkURL: artwork[index],
-    dateAdded: new Date(now.getTime() - index * 86_400_000).toISOString(),
-    available: true,
-    missing: false,
-    storageLocation,
-  }));
-}
-
-function sampleRemoteSongs() {
-  return [
-    { id: "remote-aurora", title: "Aurora Circuit", artist: "Glass Meridian", album: "Remote Signals", duration: 233, size: 2_450_000, artwork_url: browserArtwork("AURORA", "#4338ca", "#0891b2"), source_url: "https://example.com/resonance/aurora", media_kind: "audio" },
-    { id: "remote-tide", title: "Neon Tide", artist: "Mira Vale", album: "Remote Signals", duration: 208, size: 2_120_000, artwork_url: browserArtwork("TIDE", "#be185d", "#7c3aed"), source_url: "https://example.com/resonance/tide", media_kind: "audio" },
-    { id: "remote-echo", title: "Echo Pattern", artist: "Northline", album: "Relay", duration: 196, size: 1_980_000, artwork_url: browserArtwork("ECHO", "#166534", "#0369a1"), source_url: "https://example.com/resonance/echo", media_kind: "audio" },
-  ];
-}
-
-function browserAccountSession() {
-  return {
-    accessToken: "browser-fixture-token",
-    baseURL: "https://resonance-core.blithe-haven-9710.chatgpt.site",
-    profileID: "default",
-    displayName: "Browser Tester",
-    email: "browser@example.test",
-    role: "admin",
-    imageURL: null,
-  };
-}
-
-function createFixtureState(audioURLs) {
-  const state = createEmptyState();
-  const tracks = sampleTracks(audioURLs);
-  state.tracks = tracks;
-  state.favorites = tracks.slice(0, 2).map(({ id }) => id);
-  state.playlists = [
-    { id: "liked", name: "Liked Songs", trackIDs: state.favorites, isSystem: true },
-    { id: "browser-focus", name: "Focus Set", trackIDs: tracks.slice(0, 4).map(({ id }) => id), isSystem: false },
-    { id: "browser-evening", name: "Evening Rotation", trackIDs: tracks.slice(2).map(({ id }) => id), isSystem: false },
-  ];
-  state.currentTrackID = tracks[0]?.id || null;
-  state.playbackQueueIDs = tracks.map(({ id }) => id);
-  state.playbackSourceQueueIDs = [...state.playbackQueueIDs];
-  state.appPreferences = {
-    ...state.appPreferences,
-    theme: "midnight",
-  };
-  return state;
-}
-
-function defaultBrowserStorage() {
-  try {
-    return globalThis?.localStorage || null;
-  } catch {
-    // Some browsers expose localStorage through a getter that throws when
-    // storage is disabled or blocked by the current origin.
-    return null;
-  }
-}
-
-function safeStorage(storage) {
-  return storage && typeof storage.getItem === "function" && typeof storage.setItem === "function"
-    ? storage
+function safeStorage(candidate) {
+  return candidate && typeof candidate.getItem === "function" && typeof candidate.setItem === "function"
+    ? candidate
     : null;
 }
 
-function loadStoredState(storage, audioURLs) {
-  if (!storage) return createFixtureState(audioURLs);
+function defaultStorage() {
+  try { return safeStorage(globalThis.localStorage); }
+  catch { return null; }
+}
+
+function storedJSON(storage, key, fallback) {
+  if (!storage) return clone(fallback);
   try {
-    const encoded = storage.getItem(BROWSER_STATE_KEY);
-    if (!encoded) return createFixtureState(audioURLs);
-    const parsed = JSON.parse(encoded);
-    if (!parsed || parsed.runtimeVersion !== BROWSER_RUNTIME_VERSION || !parsed.state) {
-      return createFixtureState(audioURLs);
-    }
-    const state = { ...createFixtureState(audioURLs), ...parsed.state };
-    const fixtureTracks = new Map(sampleTracks(audioURLs).map((track) => [track.id, track]));
-    state.tracks = (Array.isArray(state.tracks) ? state.tracks : []).map((track) => {
-      const fixture = fixtureTracks.get(track?.id);
-      return fixture ? { ...fixture, ...track, filePath: null, fileUrl: fixture.fileUrl } : track;
-    });
-    return state;
+    const value = JSON.parse(storage.getItem(key));
+    return value && typeof value === "object" ? value : clone(fallback);
   } catch {
-    return createFixtureState(audioURLs);
+    return clone(fallback);
   }
 }
 
-function saveStoredState(storage, state) {
+function saveJSON(storage, key, value) {
   if (!storage) return;
-  try {
-    storage.setItem(BROWSER_STATE_KEY, JSON.stringify({
-      runtimeVersion: BROWSER_RUNTIME_VERSION,
-      state,
-    }));
-  } catch {
-    // Browser storage is a convenience for UI work, not renderer authority.
-  }
+  try { storage.setItem(key, JSON.stringify(value)); }
+  catch { /* Private browsing may disable persistent storage. */ }
+}
+
+function browserLibrary(storage) {
+  const state = { ...createEmptyState(), ...storedJSON(storage, BROWSER_LIBRARY_KEY, createEmptyState()) };
+  state.tracks = (Array.isArray(state.tracks) ? state.tracks : [])
+    .filter((track) => track?.transientStream !== true)
+    .map((track) => {
+      const staleObjectURL = typeof track?.fileUrl === "string" && track.fileUrl.startsWith("blob:");
+      return staleObjectURL ? { ...track, fileUrl: "", available: false, missing: true } : track;
+    });
+  return state;
 }
 
 function listenerRegistry() {
   const listeners = new Map();
-  const subscribe = (event, callback) => {
-    if (typeof callback !== "function") return () => {};
-    const set = listeners.get(event) || new Set();
-    set.add(callback);
-    listeners.set(event, set);
-    return () => set.delete(callback);
+  return {
+    subscribe(name, callback) {
+      if (typeof callback !== "function") return () => {};
+      const group = listeners.get(name) || new Set();
+      group.add(callback);
+      listeners.set(name, group);
+      return () => group.delete(callback);
+    },
+    emit(name, value) {
+      for (const callback of listeners.get(name) || []) {
+        try { callback(value); } catch { /* A listener cannot break the runtime. */ }
+      }
+    },
   };
-  const emit = (event, value) => {
-    for (const callback of listeners.get(event) || []) {
-      try { callback(value); } catch { /* A test listener must not break the renderer. */ }
-    }
+}
+
+async function responseJSON(response, fallbackMessage) {
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload?.error || payload?.message || `${fallbackMessage} (HTTP ${response.status}).`);
+  return payload;
+}
+
+function browserStreamOnlyConfig(now = Date.now()) {
+  return {
+    schema_version: 1,
+    revision: 1,
+    issued_at: new Date(now - 1_000).toISOString(),
+    not_before: new Date(now - 1_000).toISOString(),
+    expires_at: new Date(now + STREAM_ONLY_CONFIG_LIFETIME_MS).toISOString(),
+    values: {
+      "upload.local_file": true,
+      "upload.server_source_link": true,
+      "upload.reviewed_match": false,
+      "upload.external_object": false,
+      "download.offline_mode": "stream_only",
+      "download.playback_mode": "same_origin_resolver",
+      "matcher.mode": "off",
+      "storage.read_mode": "r2_only",
+      "storage.r2_reclaim": false,
+    },
+    kill_switches: {
+      all_uploads: false,
+      link_imports: false,
+      offline_downloads: true,
+      external_reads: true,
+      r2_reclaim: true,
+    },
+    verified: true,
+    source: "browser-runtime",
   };
-  return { subscribe, emit };
 }
 
 function browserWindow() {
-  try {
-    return typeof globalThis === "object" && globalThis.window ? globalThis.window : null;
-  } catch {
-    return null;
-  }
+  return typeof window === "undefined" ? null : window;
 }
 
-function requestBrowserReload(currentWindow = browserWindow()) {
-  if (!currentWindow || typeof currentWindow.location?.reload !== "function") return false;
-  try {
-    currentWindow.location.reload();
-    return true;
-  } catch {
-    return false;
-  }
+function fileTitle(name) {
+  return String(name || "Imported song").replace(/\.[^.]+$/, "").trim() || "Imported song";
 }
 
-function dispatchBrowserStateReset(currentWindow, state) {
-  if (!currentWindow || typeof currentWindow.dispatchEvent !== "function") return;
-  try {
-    const EventConstructor = currentWindow.CustomEvent
-      || (typeof globalThis === "object" ? globalThis.CustomEvent : null);
-    if (typeof EventConstructor !== "function") return;
-    currentWindow.dispatchEvent(new EventConstructor(BROWSER_STATE_RESET_EVENT, {
-      detail: clone(state),
-    }));
-  } catch {
-    // Browser automation can still use the explicit reload helper when a
-    // restricted document refuses to construct or dispatch custom events.
-  }
+async function chooseBrowserAudioFiles(currentWindow = browserWindow()) {
+  const document = currentWindow?.document;
+  if (!document) return [];
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "audio/*,video/*";
+    input.multiple = true;
+    input.hidden = true;
+    input.addEventListener("change", () => {
+      const tracks = [...(input.files || [])].map((file) => ({
+        id: `browser-local:${createClientUUID()}`,
+        title: fileTitle(file.name),
+        artist: "Unknown Artist",
+        album: "Local Files",
+        duration: 0,
+        size: Number(file.size) || 0,
+        filePath: null,
+        fileUrl: URL.createObjectURL(file),
+        artwork: null,
+        artworkURL: null,
+        dateAdded: new Date().toISOString(),
+        available: true,
+        missing: false,
+        storageLocation: "local",
+        browserLocal: true,
+      }));
+      input.remove();
+      resolve(tracks);
+    }, { once: true });
+    document.body.append(input);
+    input.click();
+  });
 }
 
 export function createBrowserResonanceAPI(options = {}) {
-  let storage;
-  try {
-    storage = options && Object.prototype.hasOwnProperty.call(options, "storage")
-      ? options.storage
-      : defaultBrowserStorage();
-  } catch {
-    storage = null;
-  }
-  const browserStorage = safeStorage(storage);
-  const audioURLs = fixtureAudioURLs();
-  let state = loadStoredState(browserStorage, audioURLs);
+  const storage = safeStorage(Object.prototype.hasOwnProperty.call(options, "storage") ? options.storage : defaultStorage());
+  const currentFetch = options.fetchImpl || globalThis.fetch?.bind(globalThis);
+  const currentWindow = options.window || browserWindow();
   const events = listenerRegistry();
-  let closeHandler = null;
-  let importSequence = 0;
-
-  const browserImportedTrack = (metadata = {}, prefix = "browser-import") => {
-    importSequence += 1;
-    const duration = Math.max(1, Math.round(Number(metadata.durationSeconds) || 214));
-    const id = `${prefix}-${Date.now().toString(36)}-${importSequence}`;
-    const sourceURL = metadata.sourceURL || `https://example.com/resonance/${id}`;
-    return {
-      id,
-      title: metadata.title || "Browser Import",
-      artist: metadata.artist || "Fixture Artist",
-      album: metadata.album || "Browser Imports",
-      duration,
-      size: duration * 10_000,
-      filePath: null,
-      fileUrl: createBrowserAudioURL(duration),
-      sourceURL,
-      artwork: metadata.artworkURL || browserArtwork("IMPORT", "#6d28d9", "#0f766e"),
-      artworkURL: metadata.artworkURL || browserArtwork("IMPORT", "#6d28d9", "#0f766e"),
-      dateAdded: new Date().toISOString(),
-      available: true,
-      missing: false,
-      storageLocation: "local",
-    };
-  };
+  let state = browserLibrary(storage);
+  let clerkPromise = null;
+  let accountSession = null;
+  let clerkUnsubscribe = null;
 
   const persist = (nextState) => {
     state = clone(nextState || state);
-    saveStoredState(browserStorage, state);
+    const durable = clone(state);
+    durable.tracks = (durable.tracks || []).filter((track) => track?.transientStream !== true);
+    saveJSON(storage, BROWSER_LIBRARY_KEY, durable);
     return clone(state);
   };
 
+  const loadClerk = async () => {
+    if (options.clerk) return options.clerk;
+    if (clerkPromise) return clerkPromise;
+    clerkPromise = (async () => {
+      if (!currentWindow?.document || typeof currentFetch !== "function") return null;
+      const configuration = await responseJSON(
+        await currentFetch("/api/browser/auth/config", { cache: "no-store" }),
+        "Account sign-in configuration is unavailable",
+      );
+      if (!currentWindow.Clerk) {
+        await new Promise((resolve, reject) => {
+          const script = currentWindow.document.createElement("script");
+          script.src = "/api/browser/auth/clerk.js";
+          script.async = true;
+          script.crossOrigin = "anonymous";
+          script.dataset.clerkPublishableKey = configuration.publishable_key;
+          script.onload = resolve;
+          script.onerror = () => reject(new Error("The account sign-in client could not be loaded."));
+          currentWindow.document.head.append(script);
+        });
+      }
+      const clerk = currentWindow.Clerk;
+      if (!clerk) throw new Error("The account sign-in client is unavailable.");
+      await clerk.load({ publishableKey: configuration.publishable_key });
+      clerk.__resonanceTokenTemplate = configuration.token_template;
+      return clerk;
+    })();
+    return clerkPromise;
+  };
+
+  const accessToken = async () => {
+    const clerk = await loadClerk();
+    return clerk?.session?.getToken
+      ? clerk.session.getToken({ template: clerk.__resonanceTokenTemplate || "resonance" })
+      : null;
+  };
+
+  const request = async (path, init = {}, { authenticated = true } = {}) => {
+    if (typeof currentFetch !== "function") throw new Error("Browser networking is unavailable.");
+    const headers = new Headers(init.headers || {});
+    if (authenticated) {
+      const token = await accessToken();
+      if (!token) throw new Error("Sign in to your Resonance account.");
+      headers.set("Authorization", `Bearer ${token}`);
+    }
+    return currentFetch(path, { ...init, headers, cache: "no-store" });
+  };
+
+  const resolveAccountSession = async () => {
+    const token = await accessToken();
+    if (!token) return null;
+    const account = await responseJSON(await request("/api/browser/auth/me"), "Account access was rejected");
+    accountSession = {
+      accessToken: token,
+      expiresAt: Date.now() + 45_000,
+      email: account.email,
+      role: account.role,
+      baseURL: account.base_url || "https://resonance-core.blithe-haven-9710.chatgpt.site",
+      accountID: account.id,
+      profileID: account.profile_id || account.id,
+      displayName: account.display_name || account.email,
+      imageURL: account.image_url || null,
+      migratedProfileID: account.migrated_profile_id || null,
+    };
+    return clone(accountSession);
+  };
+
+  const publishAccountSession = async () => {
+    try { events.emit("accountSession", { session: await resolveAccountSession(), error: null }); }
+    catch (error) { events.emit("accountSession", { session: null, error: error?.message || "Account session failed." }); }
+  };
+
+  const ensureClerkListener = async () => {
+    const clerk = await loadClerk();
+    if (!clerk || clerkUnsubscribe || typeof clerk.addListener !== "function") return clerk;
+    clerkUnsubscribe = clerk.addListener(() => { void publishAccountSession(); });
+    return clerk;
+  };
+
+  const profileHeaders = (profileID) => ({ "X-Resonance-Profile": String(profileID || accountSession?.profileID || "default") });
+  const jsonRequest = async (path, init, message) => responseJSON(await request(path, init), message);
+
   const api = {
+    runtime: "browser",
     loadLibrary: async () => ({ state: clone(state) }),
     saveLibrary: async (nextState) => { persist(nextState); return true; },
     refreshLibraryMetadata: async () => [],
     videoFrames: async () => [],
-    onPrepareToClose: (callback) => { closeHandler = callback; return () => { closeHandler = null; }; },
+    onPrepareToClose: () => () => {},
     readyToClose: () => undefined,
     updateAppPreferences: async (preferences) => {
       state.appPreferences = { ...state.appPreferences, ...(preferences || {}) };
-      saveStoredState(browserStorage, state);
+      persist(state);
       return true;
     },
-    updateDiscordPresence: async () => ({ state: "disabled", message: "Rich Presence is unavailable in a browser preview.", applicationConfigured: false }),
-    getDiscordPresenceStatus: async () => ({ state: "disabled", message: "Rich Presence is unavailable in a browser preview.", applicationConfigured: false }),
+    updateDiscordPresence: async () => ({ state: "disabled", message: "Rich Presence is available in the installed app.", applicationConfigured: false }),
+    getDiscordPresenceStatus: async () => ({ state: "disabled", message: "Rich Presence is available in the installed app.", applicationConfigured: false }),
     onDiscordPresenceStatus: (callback) => events.subscribe("discordPresenceStatus", callback),
-    importAudio: async () => [browserImportedTrack({ title: "Chosen Browser File", artist: "Fixture Artist", album: "Browser Imports", durationSeconds: 172 })],
+    importAudio: async () => chooseBrowserAudioFiles(currentWindow),
     loadProfilePicture: async () => null,
     chooseProfilePicture: async () => null,
     removeProfilePicture: async () => true,
-    localImportCapabilities: async () => ({ enabled: true, browser: true, providers: ["youtube", "spotify", "soundcloud"] }),
-    fetchLocalImportArtwork: async (source) => typeof source === "string" && source.startsWith("data:image/") ? source : null,
-    previewLocalImport: async () => ({ ok: true, result: { fileURL: createBrowserAudioURL(30), durationSeconds: 30 } }),
+    localImportCapabilities: async () => ({ enabled: false, browser: true, providers: [] }),
+    fetchLocalImportArtwork: async () => null,
+    previewLocalImport: async () => ({ ok: false, error: { message: "Source previews require the installed app." } }),
     cancelLocalImportPreview: async () => true,
-    resolveLocalImport: async ({ source, mediaKind = "audio" } = {}) => {
-      const title = String(source || "Browser Search").trim().replace(/^https?:\/\//, "") || "Browser Search";
-      const artworkURL = browserArtwork("FOUND", "#7c3aed", "#0e7490");
-      const track = { title: title.slice(0, 54), artist: "Browser Search", album: "Fixture Results", durationSeconds: 214, artworkURL, sourceURL: String(source || "") };
-      return { ok: true, result: { kind: "search_results", mediaKind, track, candidates: [
-        { ...track, title: `${track.title} — Studio`, searchProvider: "youtube", sourceProvider: "youtube", sourceURL: "https://example.com/browser/studio", thumbnailURL: artworkURL, confidence: "best match", actionable: true },
-        { ...track, title: `${track.title} — Live`, searchProvider: "spotify", sourceProvider: "spotify", sourceURL: "https://example.com/browser/live", thumbnailURL: artworkURL, confidence: "alternate", actionable: true },
-        { ...track, title: `${track.title} — Acoustic`, searchProvider: "soundcloud", sourceProvider: "soundcloud", sourceURL: "https://example.com/browser/acoustic", thumbnailURL: artworkURL, confidence: "alternate", actionable: true },
-      ] } };
-    },
-    startLocalImport: async ({ metadata = {}, sourceURL } = {}) => {
-      const duplicate = state.tracks.find((track) => track.sourceURL === sourceURL);
-      if (duplicate) return { ok: true, result: { kind: "duplicate", trackID: duplicate.id, sourceIdentity: { sourceURL } } };
-      events.emit("localImportProgress", { stage: "downloading", completed: 1, total: 3, currentFile: metadata.title || "Browser import" });
-      await new Promise((resolve) => setTimeout(resolve, 120));
-      events.emit("localImportProgress", { stage: "processing", completed: 2, total: 3, currentFile: metadata.title || "Browser import" });
-      const track = browserImportedTrack({ ...metadata, sourceURL });
-      events.emit("localImportProgress", { stage: "complete", completed: 3, total: 3, currentFile: track.title });
-      return { ok: true, result: { kind: "created", track, sourceIdentity: { sourceURL } } };
-    },
-    startExternalImport: async () => ({ ok: false, error: { stage: "downloading", message: "Web import is unavailable in a browser fixture." } }),
+    resolveLocalImport: async () => ({ ok: false, error: { message: "Source search requires the installed app." } }),
+    startLocalImport: async () => ({ ok: false, error: { message: "Source downloads require the installed app." } }),
+    startExternalImport: async () => ({ ok: false, error: { message: "Source downloads require the installed app." } }),
     cancelLocalImport: async () => true,
-    uploadLocalImport: async () => ({ ok: false, error: { message: "Uploads are unavailable in a browser fixture." } }),
+    uploadLocalImport: async () => ({ ok: false, error: { message: "Upload the song from the installed app." } }),
     onLocalImportProgress: (callback) => events.subscribe("localImportProgress", callback),
     deleteAudio: async () => true,
     revealAudio: async () => false,
-    storageSummary: async () => {
-      const localBytes = state.tracks
-        .filter((track) => track?.available !== false && track?.storageLocation !== "server-cache")
-        .reduce((total, track) => total + Math.max(0, Number(track.size) || 0), 0);
-      const remoteBytes = state.tracks
-        .filter((track) => track?.available !== false && track?.storageLocation === "server-cache")
-        .reduce((total, track) => total + Math.max(0, Number(track.size) || 0), 0);
-      let availableBytes = DEFAULT_CAPACITY_BYTES - localBytes - remoteBytes;
-      let capacityBytes = DEFAULT_CAPACITY_BYTES;
-      try {
-        const estimate = await globalThis.navigator?.storage?.estimate?.();
-        if (Number.isFinite(estimate?.quota) && estimate.quota > 0) capacityBytes = estimate.quota;
-        if (Number.isFinite(estimate?.quota) && Number.isFinite(estimate?.usage)) {
-          availableBytes = Math.max(0, estimate.quota - estimate.usage);
-        }
-      } catch { /* Use deterministic fallback. */ }
-      return { localBytes, remoteBytes, availableBytes: Math.max(0, availableBytes), capacityBytes };
+    storageSummary: async () => ({ localBytes: 0, remoteBytes: 0, availableBytes: 0, capacityBytes: 0 }),
+    fetchCatalog: async ({ profileID } = {}) => jsonRequest("/api/browser/catalog", { headers: profileHeaders(profileID) }, "The server catalog is unavailable"),
+    resolveServerSourceMetadata: async () => ({ ok: false, error: { message: "Source metadata lookup requires the installed app." } }),
+    fetchClientConfig: async () => ({ config: browserStreamOnlyConfig(), source: "browser-runtime" }),
+    createServerStream: async ({ profileID, songID } = {}) => jsonRequest("/api/browser/streams", {
+      method: "POST",
+      headers: { ...profileHeaders(profileID), "Content-Type": "application/json" },
+      body: JSON.stringify({ songID }),
+    }, "Streaming could not be started"),
+    releaseServerStream: async (streamURL) => {
+      const url = new URL(String(streamURL || ""), currentWindow?.location?.href || "http://127.0.0.1/");
+      if (url.origin !== currentWindow?.location?.origin || !url.pathname.startsWith("/api/browser/streams/")) return false;
+      return (await request(url.pathname, { method: "DELETE" }, { authenticated: false })).ok;
     },
-    fetchCatalog: async () => ({ songs: clone(sampleRemoteSongs()), count: sampleRemoteSongs().length }),
-    resolveServerSourceMetadata: async () => null,
-    fetchClientConfig: async () => ({ config: clone(SAFE_CLIENT_CONFIG), source: "browser" }),
-    createServerStream: async () => null,
-    releaseServerStream: async () => true,
-    createListenAlong: async () => ({ ok: false, error: { message: "Listen Along needs the Electron server bridge." } }),
-    joinListenAlong: async () => ({ ok: false, error: { message: "Listen Along needs the Electron server bridge." } }),
-    updateListenAlong: async () => ({ ok: false, error: { message: "Listen Along needs the Electron server bridge." } }),
+    createListenAlong: async () => ({ ok: false, error: { message: "Listen Along requires the installed app." } }),
+    joinListenAlong: async () => ({ ok: false, error: { message: "Listen Along requires the installed app." } }),
+    updateListenAlong: async () => false,
     leaveListenAlong: async () => true,
-    copyListenAlongCode: async (code) => {
-      try { await globalThis.navigator?.clipboard?.writeText?.(String(code || "")); } catch { /* Clipboard permissions are optional. */ }
-      return true;
-    },
+    copyListenAlongCode: async (code) => { await currentWindow?.navigator?.clipboard?.writeText(String(code || "")); return true; },
     createListenAlongSource: async () => null,
     releaseListenAlongSource: async () => true,
     onListenAlongEvent: (callback) => events.subscribe("listenAlongEvent", callback),
     onListenAlongStatus: (callback) => events.subscribe("listenAlongStatus", callback),
-    fetchServerArtwork: async () => null,
-    fetchProfiles: async () => ({ profiles: [{ id: "default", name: "Default", is_default: true }] }),
-    createProfile: async () => ({ profile: { id: "browser", name: "Browser profile", is_default: false } }),
-    fetchPlaylists: async () => ({ revision: state.playlistRevision || 0, playlists: [], liked_song_ids: [], clip_ranges: [] }),
-    putPlaylists: async () => ({ revision: state.playlistRevision || 0, playlists: [], liked_song_ids: [], clip_ranges: [] }),
-    postListeningHistory: async () => ({ accepted: 0 }),
-    fetchListeningHistory: async () => ({ entries: [] }),
-    syncServer: async ({ songIDs } = {}) => {
-      const catalogSongs = sampleRemoteSongs();
-      const selected = Array.isArray(songIDs) ? new Set(songIDs) : null;
-      const chosen = catalogSongs.filter((song) => !selected || selected.has(song.id));
-      for (let index = 0; index < chosen.length; index += 1) {
-        const song = chosen[index];
-        events.emit("transferProgress", { direction: "download", owner: "server", title: "Downloading", currentFile: song.title, completed: index, total: chosen.length, autoHide: false });
-        await new Promise((resolve) => setTimeout(resolve, 160));
-      }
-      const downloaded = chosen.map((song) => ({ ...browserImportedTrack({ title: song.title, artist: song.artist, album: song.album, durationSeconds: song.duration, artworkURL: song.artwork_url, sourceURL: song.source_url }, "browser-server"), remoteID: song.id, sourceServer: browserAccountSession().baseURL, syncProfileID: "default", storageLocation: "server-cache" }));
-      events.emit("transferProgress", { direction: "download", owner: "server", title: "Download complete", currentFile: `${downloaded.length} songs`, completed: downloaded.length, total: downloaded.length, autoHide: true });
-      return { catalog: { songs: clone(catalogSongs), count: catalogSongs.length }, downloaded, replacedTrackIDs: [], failed: [], results: [], cancelled: false };
+    fetchServerArtwork: async ({ profileID, songID } = {}) => {
+      const response = await request(`/api/browser/artwork/${encodeURIComponent(songID)}`, { headers: profileHeaders(profileID) });
+      if (!response.ok) throw new Error(`Artwork is unavailable (HTTP ${response.status}).`);
+      const blob = await response.blob();
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error("Artwork could not be decoded."));
+        reader.readAsDataURL(blob);
+      });
     },
-    uploadServer: async () => ({ selectionCancelled: true, uploaded: 0, results: [], failed: [] }),
-    importServerSource: async () => ({ ok: false, error: { message: "Server imports are unavailable in a browser fixture." } }),
+    fetchProfiles: async ({ profileID } = {}) => jsonRequest("/api/browser/profiles", { headers: profileHeaders(profileID) }, "Profiles are unavailable"),
+    createProfile: async ({ name, profileID } = {}) => jsonRequest("/api/browser/profiles", {
+      method: "POST",
+      headers: { ...profileHeaders(profileID), "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    }, "The profile could not be created"),
+    fetchPlaylists: async ({ profileID } = {}) => jsonRequest("/api/browser/playlists", { headers: profileHeaders(profileID) }, "Playlists are unavailable"),
+    putPlaylists: async ({ profileID, document } = {}) => {
+      const response = await request("/api/browser/playlists", {
+        method: "PUT",
+        headers: { ...profileHeaders(profileID), "Content-Type": "application/json" },
+        body: JSON.stringify(document || {}),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (![200, 409].includes(response.status)) {
+        throw new Error(payload?.error || payload?.message || `Playlists could not be saved (HTTP ${response.status}).`);
+      }
+      return { status: response.status, document: payload };
+    },
+    postListeningHistory: async ({ profileID, entries } = {}) => jsonRequest("/api/browser/listening-history", {
+      method: "POST",
+      headers: { ...profileHeaders(profileID), "Content-Type": "application/json" },
+      body: JSON.stringify({ entries: entries || [] }),
+    }, "Listening history could not be saved"),
+    fetchListeningHistory: async ({ profileID, limit = 2000 } = {}) => jsonRequest(`/api/browser/listening-history?limit=${encodeURIComponent(limit)}`, {
+      headers: profileHeaders(profileID),
+    }, "Listening history is unavailable"),
+    syncServer: async () => ({ catalog: { count: 0, songs: [] }, downloaded: [], failed: [], cancelled: false }),
+    uploadServer: async () => ({ uploaded: [], failed: [] }),
+    importServerSource: async () => ({ ok: false, error: { message: "Server source imports require the installed app." } }),
     discardServerUploadRetries: async () => true,
     cancelServerTransfer: async () => true,
-    deleteServerSong: async () => true,
+    deleteServerSong: async ({ profileID, songID } = {}) => jsonRequest(`/api/browser/admin/songs/${encodeURIComponent(songID)}`, {
+      method: "DELETE",
+      headers: profileHeaders(profileID),
+    }, "The server song could not be deleted"),
     loadServerCredentials: async () => ({ clientToken: "", adminToken: "" }),
     saveServerCredentials: async () => true,
-    loadAccountSession: async () => clone(browserAccountSession()),
-    signInAccount: async () => ({ ok: false, error: { message: "Account sign-in is unavailable in a browser fixture." } }),
-    refreshAccountSession: async () => null,
-    signOutAccount: async () => true,
+    loadAccountSession: async () => {
+      await ensureClerkListener();
+      return resolveAccountSession();
+    },
+    signInAccount: async () => {
+      const clerk = await ensureClerkListener();
+      if (!clerk) throw new Error("Account sign-in is unavailable.");
+      if (clerk.session) {
+        await publishAccountSession();
+        return { started: false, signedIn: true };
+      }
+      if (typeof clerk.openSignIn !== "function") throw new Error("Account sign-in is unavailable.");
+      clerk.openSignIn({});
+      return { started: true, provider: "clerk" };
+    },
+    refreshAccountSession: async () => resolveAccountSession(),
+    signOutAccount: async () => {
+      const clerk = await loadClerk();
+      await clerk?.signOut?.();
+      accountSession = null;
+      events.emit("accountSession", { session: null, error: null });
+      return true;
+    },
     onAccountSession: (callback) => events.subscribe("accountSession", callback),
     onTransferProgress: (callback) => events.subscribe("transferProgress", callback),
     openAdmin: async () => false,
@@ -420,42 +379,9 @@ export function createBrowserResonanceAPI(options = {}) {
     onUpdateStatus: (callback) => events.subscribe("updateStatus", callback),
   };
 
-  const reset = (options = {}) => {
-    state = createFixtureState(audioURLs);
-    saveStoredState(browserStorage, state);
-    const payload = clone(state);
-    events.emit("browserStateReset", payload);
-    dispatchBrowserStateReset(browserWindow(), payload);
-    // A reload is the deterministic way to make the already-running app.js
-    // renderer consume the new state. Callers that need to inspect the event
-    // without navigating can pass { reload: false }.
-    if (!options || options.reload !== false) {
-      // Let browser automation receive the reset result before navigation
-      // destroys the current execution context.
-      const resetWindow = browserWindow();
-      if (resetWindow) setTimeout(() => requestBrowserReload(resetWindow), 0);
-    }
-    return clone(state);
-  };
-
-  return Object.assign(api, {
-    browser: true,
-    browserRuntimeVersion: BROWSER_RUNTIME_VERSION,
-    browserStateResetEvent: BROWSER_STATE_RESET_EVENT,
-    getBrowserState: () => clone(state),
-    resetBrowserState: reset,
-    onBrowserStateReset: (callback) => events.subscribe("browserStateReset", callback),
-    reloadBrowserState: requestBrowserReload,
-    emitBrowserEvent: events.emit,
-    closeBrowserRuntime: async () => {
-      if (typeof closeHandler === "function") await closeHandler();
-    },
-  });
+  return api;
 }
 
 if (typeof window !== "undefined" && !window.resonance) {
-  const browserAPI = createBrowserResonanceAPI();
-  window.resonance = browserAPI;
-  // Deliberately public for browser automation and manual UI reset between runs.
-  window.__resonanceBrowser = browserAPI;
+  window.resonance = createBrowserResonanceAPI();
 }

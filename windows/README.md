@@ -16,18 +16,22 @@ pnpm run package:win
 pnpm run installer:win
 ```
 
-`pnpm ui:browser` starts a dependency-free, loopback-only renderer preview at
-`http://127.0.0.1:4173/ui/`. It serves only the `ui/` tree, keeps the renderer
-CSP active, and uses the browser fixture bridge rather than credentials or
-server requests. Set `RESONANCE_UI_BROWSER_PORT` or pass `-- --port <port>` to
-choose another local port. Stop the preview with Ctrl+C.
+`pnpm ui:browser` starts the browser client at `http://127.0.0.1:4173/ui/`.
+It keeps the renderer CSP active and exposes only allowlisted, same-origin
+relays for Clerk account state, the Resonance API, and opaque streaming media
+capabilities. Browser playback is always stream-only; bearer tokens remain in
+memory and are never included in media URLs or browser persistence. Set
+`RESONANCE_UI_BROWSER_PORT` or pass `-- --port <port>` to choose another local
+port. Stop the app with Ctrl+C.
 
-`pnpm ui:tailscale` starts the same credential-free fixture preview on the
-machine's Tailscale IPv4 address. Other devices on the same tailnet can open
+`pnpm ui:tailscale` starts the same browser client on the machine's Tailscale
+IPv4 address. Other devices on the same tailnet can open
 the printed `http://100.x.y.z:4173/ui/` URL, subject to the tailnet ACLs. The
 server binds only to that Tailscale address: wildcard and ordinary LAN
 bindings are rejected. Set `RESONANCE_UI_BROWSER_PORT` or pass
-`-- --port <port>` to choose another port.
+`-- --port <port>` to choose another port. Production Clerk browser sessions
+require a stable approved HTTPS `unblocked.mov` origin; a raw Tailscale HTTP
+address intentionally cannot bypass that identity-provider restriction.
 
 `package:win` creates a portable x64 folder in `windows/dist/`. `installer:win` creates the per-user NSIS installer under `installers/windows/dist/`.
 

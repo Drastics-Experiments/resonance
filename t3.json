@@ -13,8 +13,13 @@
       "icon": "test"
     },
     {
-      "name": "Launch Desktop Browser UI",
+      "name": "Launch Resonance Web App",
       "command": "zsh -c 'set -euo pipefail; cd \"$PWD/windows\"; corepack pnpm ui:browser'",
+      "icon": "play"
+    },
+    {
+      "name": "Launch Resonance over Tailscale",
+      "command": "zsh -c 'set -euo pipefail; cd \"$PWD/windows\"; corepack pnpm ui:tailscale'",
       "icon": "play"
     },
     {

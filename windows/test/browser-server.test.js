@@ -26,7 +26,28 @@ async function withPreview(testContext, callback) {
   }
 }
 
-test("browser preview serves the renderer at /ui/ with the CSP intact", async (t) => {
+function localReferences(source, contentType) {
+  const references = [];
+  const add = (value) => {
+    if (!value || value.startsWith("#")) return;
+    try {
+      const url = new URL(value, "http://preview.test/ui/");
+      if (url.origin !== "http://preview.test" || !url.pathname.startsWith("/ui/")) return;
+      references.push(`${url.pathname}${url.search}`);
+    } catch {
+      // A malformed or external reference is not a preview asset to fetch.
+    }
+  };
+  if (contentType.includes("html")) {
+    for (const match of source.matchAll(/(?:src|href)=["']([^"']+)["']/g)) add(match[1]);
+  }
+  if (contentType.includes("javascript")) {
+    for (const match of source.matchAll(/\bimport\s+(?:[^"'`]+?\s+from\s+)?["']([^"']+)["']/g)) add(match[1]);
+  }
+  return references;
+}
+
+test("browser client serves the renderer at /ui/ with a same-origin API CSP", async (t) => {
   await withPreview(t, async (origin) => {
     const response = await fetch(`${origin}/ui/`);
     const html = await response.text();
@@ -36,8 +57,7 @@ test("browser preview serves the renderer at /ui/ with the CSP intact", async (t
     const csp = response.headers.get("content-security-policy") || "";
     assert.match(csp, /style-src 'self'/);
     assert.match(csp, /style-src-attr 'unsafe-inline'/);
-    assert.match(csp, /connect-src blob:/);
-    assert.doesNotMatch(csp, /connect-src[^;]*https?:/);
+    assert.match(csp, /connect-src 'self' blob: https:\/\/clerk\.unblocked\.mov/);
     assert.match(html, /src="browser-runtime\.js"/);
     assert.match(html, /src="app\.js"/);
   });
@@ -57,6 +77,56 @@ test("browser preview redirects its root to /ui/ and serves module assets", asyn
     assert.equal(module.status, 200);
     assert.match(module.headers.get("content-type") || "", /^application\/javascript/);
     assert.match(await module.text(), /createBrowserResonanceAPI/);
+  });
+});
+
+test("browser service rejects unauthenticated API and stream creation", async (t) => {
+  await withPreview(t, async (origin) => {
+    for (const [path, init] of [
+      ["/api/browser/catalog", {}],
+      ["/api/browser/streams", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ songID: "song-1" }) }],
+    ]) {
+      const response = await fetch(`${origin}${path}`, init);
+      assert.equal(response.status, 401);
+      assert.match((await response.json()).error, /Sign in/);
+    }
+  });
+});
+
+test("browser preview serves the complete local renderer asset graph", async (t) => {
+  await withPreview(t, async (origin) => {
+    const queue = ["/ui/index.html"];
+    const visited = new Set();
+    while (queue.length) {
+      const assetPath = queue.shift();
+      if (visited.has(assetPath)) continue;
+      visited.add(assetPath);
+
+      const response = await fetch(`${origin}${assetPath}`);
+      assert.equal(response.status, 200, assetPath);
+      assert.match(response.headers.get("content-security-policy") || "", /script-src 'self'/, assetPath);
+      assert.ok(Number(response.headers.get("content-length")) > 0, assetPath);
+
+      const contentType = response.headers.get("content-type") || "";
+      if (!/javascript|css|html/.test(contentType)) continue;
+      for (const reference of localReferences(await response.text(), contentType)) {
+        if (!visited.has(reference)) queue.push(reference);
+      }
+    }
+
+    for (const expected of [
+      "/ui/index.html",
+      "/ui/theme-bootstrap.js",
+      "/ui/styles.css",
+      "/ui/transitions.css",
+      "/ui/shuffle-icon.css",
+      "/ui/browser-runtime.js",
+      "/ui/app.js",
+      "/ui/core.js",
+      "/ui/media-session.js",
+    ]) {
+      assert.equal(visited.has(expected), true, expected);
+    }
   });
 });
 

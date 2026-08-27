@@ -906,7 +906,7 @@ test("Windows renderer and main-process integrations retain the hardening bounda
     appSource.indexOf("async function playRemoteStream(song)"),
     appSource.indexOf("function currentServerUploadContext()"),
   );
-  assert.match(remoteStreamPlayback, /id: `stream:\$\{crypto\.randomUUID\(\)\}`/);
+  assert.match(remoteStreamPlayback, /id: `stream:\$\{createClientUUID\(\)\}`/);
   assert.match(remoteStreamPlayback, /transientStream: true/);
   assert.doesNotMatch(remoteStreamPlayback, /state\.tracks\.(?:push|unshift|splice)/);
   assert.match(appSource, /const requiresDownload = serverSongRequiresDownload\(song\);[\s\S]+disabled: !offlineDownloadAvailable && requiresDownload/);

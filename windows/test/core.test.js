@@ -8,6 +8,7 @@ import {
   APP_THEMES,
   buildLocalImportSourceIdentity,
   catalogRequestCanApply,
+  createClientUUID,
   createEmptyState,
   downloadedSongMetadataRefreshSource,
   filterPlaylists,
@@ -84,6 +85,15 @@ import {
   uniqueLocalImportPlaylistCandidates,
   updatePlaylistRemoteSongIDs,
 } from "../ui/core.js";
+
+test("client UUID generation works without secure-context crypto methods", () => {
+  const deterministic = createClientUUID({}, () => 0);
+  assert.equal(deterministic, "00000000-0000-4000-8000-000000000000");
+  assert.match(deterministic, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+
+  const native = createClientUUID({ randomUUID: () => "native-uuid" });
+  assert.equal(native, "native-uuid");
+});
 import metadata from "../metadata.cjs";
 import libraryPaths from "../library-paths.cjs";
 import serverDownload from "../server-download.cjs";
