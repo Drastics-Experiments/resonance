@@ -77,10 +77,9 @@ test("path containment does not treat a sibling with the same prefix as trusted"
 });
 
 test("Electron local-file IPC exposes folder/video import plus safe reveal/delete controls", async () => {
-  const [main, preload, browserRuntime] = await Promise.all([
+  const [main, preload] = await Promise.all([
     fs.readFile(new URL("../main.cjs", import.meta.url), "utf8"),
     fs.readFile(new URL("../preload.cjs", import.meta.url), "utf8"),
-    fs.readFile(new URL("../ui/browser-runtime.js", import.meta.url), "utf8"),
   ]);
   assert.match(main, /properties:\s*\["openFile",\s*"openDirectory",\s*"multiSelections"\]/);
   assert.match(main, /expandSelectedMediaFiles\(result\.filePaths\)/);
@@ -88,5 +87,4 @@ test("Electron local-file IPC exposes folder/video import plus safe reveal/delet
   assert.match(main, /request\.deleteOriginal !== true/);
   assert.match(main, /ipcMain\.handle\("library:reveal"/);
   assert.match(preload, /revealAudio:\s*\(filePath\)\s*=>\s*ipcRenderer\.invoke\("library:reveal"/);
-  assert.match(browserRuntime, /revealAudio:\s*async/);
 });

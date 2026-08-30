@@ -4,8 +4,9 @@ The macOS desktop client uses the shared Electron implementation in `windows/`.
 It supports local music import and playback, playlists, favorites, metadata and
 cover art, authenticated server catalog/sync/upload/delete, persistent
 credentials, and GitHub Release updates. The macOS workflow packages that same
-client with Electron-builder, so the UI can be exercised in the browser preview
-without compiling a native Swift target.
+client with Electron-builder. The renderer runs only through Electron's preload
+bridge; the remote preview endpoint distributes source for local app builds
+rather than rendering the application in a web browser.
 
 ## Develop
 

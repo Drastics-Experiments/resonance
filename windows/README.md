@@ -10,24 +10,49 @@ Custom playlists use the same revisioned server document as the macOS and iOS cl
 pnpm install --frozen-lockfile
 pnpm test
 pnpm start
-pnpm ui:browser
-pnpm ui:tailscale
+pnpm preview:tailscale
 pnpm run package:win
 pnpm run installer:win
 ```
 
-`pnpm ui:browser` starts a dependency-free, loopback-only renderer preview at
-`http://127.0.0.1:4173/ui/`. It serves only the `ui/` tree, keeps the renderer
-CSP active, and uses the browser fixture bridge rather than credentials or
-server requests. Set `RESONANCE_UI_BROWSER_PORT` or pass `-- --port <port>` to
-choose another local port. Stop the preview with Ctrl+C.
+The renderer requires Electron's preload bridge and is not served as a browser
+application. `pnpm preview:tailscale` starts only the remote-preview v1 source
+export on the machine's Tailscale IPv4 address. Other devices on the same
+tailnet can request the printed manifest URL, subject to the tailnet ACLs. The
+server binds only to that Tailscale address: wildcard and ordinary LAN bindings
+are rejected. Set `RESONANCE_REMOTE_PREVIEW_PORT` or pass `-- --port <port>` to
+choose another port. Stop the export server with Ctrl+C.
 
-`pnpm ui:tailscale` starts the same credential-free fixture preview on the
-machine's Tailscale IPv4 address. Other devices on the same tailnet can open
-the printed `http://100.x.y.z:4173/ui/` URL, subject to the tailnet ACLs. The
-server binds only to that Tailscale address: wildcard and ordinary LAN
-bindings are rejected. Set `RESONANCE_UI_BROWSER_PORT` or pass
-`-- --port <port>` to choose another port.
+The export is a short-lived, buildable snapshot of the current worktree for a
+trusted Mac preview launcher on the same tailnet:
+
+```text
+GET /__resonance/preview/v1/manifest.json
+GET /__resonance/preview/v1/source/<sha256>.zip
+```
+
+The versioned JSON manifest identifies project `resonance`, target
+`macos-electron-preview`, the Git branch and full commit, whether the worktree
+is dirty, a human-readable revision label, and the source ZIP's content-addressed
+URL, byte size, and SHA-256. The launcher must reject an expired manifest,
+require the archive URL to remain on the manifest origin, verify its size and
+lowercase SHA-256 before extraction, and extract it into a new isolated
+directory.
+
+One snapshot is held for 24 hours so a manifest and its subsequent archive
+download cannot silently refer to different working-tree versions. The archive
+contains tracked files plus non-ignored uncommitted source files. It filters
+repository internals, environment files, credential/session files, signing-key
+formats, dependency trees, generated build directories, local application
+state, and audio/video library payloads; symbolic links are rejected. Its root
+contains `.launcher-terminal.zsh`, `windows/package.json`, and
+`windows/pnpm-lock.yaml`. The receiving Mac creates a local Git repository,
+then invokes the snapshot's standard `res_launch_macos` path to install locked
+dependencies, clone and ad-hoc sign Electron under a unique Preview bundle
+identity, and launch with isolated app data. The manifest never supplies a
+remote command or credentials. Tailnet ACLs and Tailscale are the transport
+authorization boundary; do not expose the preview address outside the trusted
+tailnet.
 
 `package:win` creates a portable x64 folder in `windows/dist/`. `installer:win` creates the per-user NSIS installer under `installers/windows/dist/`.
 

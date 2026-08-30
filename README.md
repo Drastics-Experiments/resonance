@@ -6,7 +6,7 @@ Resonance is a cross-platform music player. Windows and macOS share one Electron
 
 | Path | Purpose |
 | --- | --- |
-| `windows/` | Shared Electron source for Windows, macOS, and browser UI testing |
+| `windows/` | Shared Electron source for the Windows and macOS applications |
 | `mac/` | macOS Electron packaging configuration, updater helper, and release tooling (shared source in `windows/`) |
 | `ios/` | Native SwiftUI iOS application |
 | `android/` | Native Kotlin and Jetpack Compose Android application |
@@ -26,7 +26,7 @@ The launch and test actions in `t3.json` are worktree-aware:
 ```text
 Launch macOS Preview
 Launch Windows Preview
-Launch Desktop Browser UI
+Launch Remote Preview Source
 Launch iOS Simulator
 Launch Android Emulator
 Test macOS
@@ -36,9 +36,12 @@ Test Android
 Show Resonance Instance Names
 ```
 
-Each action verifies that it runs at a Git worktree root, derives a stable
-identity from that root's canonical path, and includes the readable directory
-name plus the first 12 digits of the path's SHA-256 hash in every instance name.
+Each application launch/test action verifies that it runs at a Git worktree
+root, derives a stable identity from that root's canonical path, and includes
+the readable directory name plus the first 12 digits of the path's SHA-256 hash
+in every instance name. The source-only remote-preview action does not launch an
+application instance; it exposes the current worktree through the fixed v1
+manifest contract.
 The same worktree path always produces the same names and selectors; moving the
 worktree deliberately gives it a new identity. Runtime paths, desktop bundle
 IDs and state, mobile app IDs, simulator devices, Android emulator IDs, test
