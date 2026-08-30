@@ -47,7 +47,6 @@ import {
   persistentPlaybackIDs,
   physicalStorageClassForTrack,
   planMissingDownloadedUploads,
-  playlistArtworkTrackIDs,
   playlistEntryKey,
   playlistInsertionIndex,
   preservedUploadSourceURL,
@@ -248,6 +247,7 @@ let localImportProviderFocus = "youtube";
 let availableWindowsUpdateVersion = null;
 let dismissedWindowsUpdateVersion = null;
 let windowsUpdateReady = false;
+let updateStatusMessage = "Updates are checked automatically";
 let mediaSessionController = null;
 let mediaSessionConfigured = false;
 const LOCAL_IMPORT_AUTO_RESOLVE_DELAY = 450;
@@ -3629,6 +3629,7 @@ async function hydrateServerArtwork(song) {
   if (cached) {
     song.artwork = cached;
     updateServerArtworkNode(song);
+    updatePlaylistArtworkNodes(song);
     return;
   }
   let pending = serverArtworkPending.get(key);
@@ -3650,6 +3651,7 @@ async function hydrateServerArtwork(song) {
     serverArtworkCache.set(key, dataURL);
     song.artwork = dataURL;
     updateServerArtworkNode(song);
+    updatePlaylistArtworkNodes(song);
     if ($("#listeningHistoryDialog").open) renderListeningHistory();
     if ($("#nowPlayingDialog").open && fullPlayerQueueTab === "history") renderFullPlayerQueue();
   } catch {
@@ -3712,6 +3714,7 @@ async function hydrateServerMetadataArtwork(song, context, generation) {
     song.artwork = cached;
     song.metadataArtworkLoading = false;
     updateServerArtworkNode(song);
+    updatePlaylistArtworkNodes(song);
     return;
   }
   let pending = serverArtworkPending.get(key);
@@ -3731,6 +3734,7 @@ async function hydrateServerMetadataArtwork(song, context, generation) {
       current.artwork = artwork;
     }
     updateServerArtworkNode(current);
+    updatePlaylistArtworkNodes(current);
     if ($("#listeningHistoryDialog").open) renderListeningHistory();
     if ($("#nowPlayingDialog").open && fullPlayerQueueTab === "history") renderFullPlayerQueue();
   } finally {
@@ -4071,19 +4075,33 @@ function artwork(track, { animateLoading = false, forceLoading = false } = {}) {
 }
 
 function playlistArtworkMarkup(playlist, { className = "playlist-art", tagName = "div" } = {}) {
-  const trackIDs = playlistArtworkTrackIDs(playlist);
+  const artworkTracks = playlist?.isSystem
+    ? []
+    : tracksForPlaylist(state, playlist?.id, serverCatalog).slice(0, 4);
   const classes = `playlist-artwork ${className}`;
-  if (!trackIDs.length) {
+  if (!artworkTracks.length) {
     return `<${tagName} class="${classes} playlist-artwork-fallback" aria-hidden="true">${playlist?.isSystem ? "♥" : "♪"}</${tagName}>`;
   }
 
-  const tracksByID = new Map(state.tracks.map((track) => [track.id, track]));
   const cells = Array.from({ length: 4 }, (_, index) => {
-    const source = tracksByID.get(trackIDs[index])?.artwork;
+    const track = artworkTracks[index];
+    const source = track?.artwork;
     const canRenderImage = typeof source === "string" && source && !/^https?:/i.test(source);
-    return `<span class="playlist-artwork-cell">${canRenderImage ? squareArtworkImageMarkup(source) : "♪"}</span>`;
+    const remoteID = String(track?.remoteID || "").trim();
+    return `<span class="playlist-artwork-cell"${remoteID ? ` data-playlist-artwork-remote-id="${escapeHTML(remoteID)}"` : ""}>${canRenderImage ? squareArtworkImageMarkup(source) : "♪"}</span>`;
   }).join("");
   return `<${tagName} class="${classes} playlist-artwork-collage" aria-hidden="true">${cells}</${tagName}>`;
+}
+
+function updatePlaylistArtworkNodes(song) {
+  const remoteID = String(song?.id || "").trim();
+  const source = song?.artwork;
+  if (!remoteID || typeof source !== "string" || !source || /^https?:/i.test(source)) return;
+  document.querySelectorAll("[data-playlist-artwork-remote-id]").forEach((cell) => {
+    if (cell.dataset.playlistArtworkRemoteId !== remoteID) return;
+    cell.innerHTML = squareArtworkImageMarkup(source);
+    bindSquareArtworkImage(cell.querySelector("img"));
+  });
 }
 
 function displayAlbum(track) {
@@ -4393,10 +4411,10 @@ function renderStorage() {
   const storageHasQuery = Boolean(storageQuery.trim());
   const storageEmptyTitle = storageHasQuery ? "No matching songs" : storageScope === "downloads" ? "No server downloads yet" : storageScope === "files" ? "No imported files yet" : "No songs stored yet";
   const storageEmptyHelp = storageHasQuery ? "Try another search." : storageScope === "downloads" ? "Download songs from Music Server to keep them on this device." : "Import audio files to add them to this device.";
-  content.innerHTML = `<div class="page storage-page"><div class="page-title-row"><div><span class="eyebrow">ON THIS DEVICE</span><h1>Song Storage</h1></div><div class="page-title-actions"><div class="storage-import-control" id="storageImportControl"><button class="primary storage-import-trigger" id="storageImportMenuButton" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="storageImportMenu"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 16v3h14v-3"/></svg></span><span>Import</span><svg class="storage-import-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div class="storage-import-menu" id="storageImportMenu" role="menu" aria-label="Choose an import type" hidden>${localImportAvailable ? '<button class="storage-import-option" type="button" role="menuitem" data-storage-import="link"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></span><span><strong>Import from Web</strong><small>Paste a link or search music</small></span></button>' : ""}<button class="storage-import-option" type="button" role="menuitem" data-storage-import="files"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h6l2-2h8v13H4zM12 10v6m-3-3h6"/></svg></span><span><strong>Import files</strong><small>Choose audio from this device</small></span></button></div></div><button class="secondary" id="storageEdit" ${!storageEditing && !tracks.length ? "disabled" : ""}>${storageEditing ? "Done" : "Edit"}</button></div></div>
+  content.innerHTML = `<div class="page storage-page"><div class="page-title-row"><div><span class="eyebrow">ON THIS DEVICE</span><h1>Song Storage</h1></div><div class="page-title-actions"><div class="storage-import-control" id="storageImportControl"><button class="storage-import-trigger" id="storageImportMenuButton" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="storageImportMenu"><span class="button-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4v10m0 0 3.5-3.5M12 14l-3.5-3.5M5 17v2h14v-2"/></svg></span><span>Import</span><svg class="storage-import-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button><div class="storage-import-menu" id="storageImportMenu" role="menu" aria-label="Choose an import type" hidden>${localImportAvailable ? '<button class="storage-import-option" type="button" role="menuitem" data-storage-import="link"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></span><span><strong>Import from Web</strong><small>Paste a link or search music</small></span></button>' : ""}<button class="storage-import-option" type="button" role="menuitem" data-storage-import="files"><span class="storage-import-option-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h6l2-2h8v13H4zM12 10v6m-3-3h6"/></svg></span><span><strong>Import files</strong><small>Choose audio from this device</small></span></button></div></div><button class="storage-edit-trigger" id="storageEdit" ${!storageEditing && !tracks.length ? "disabled" : ""}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 16.5-.5 4 4-.5L18.8 8.7l-3.5-3.5L4 16.5ZM13.8 6.7l3.5 3.5"/></svg><span>${storageEditing ? "Done" : "Edit"}</span></button></div></div>
     <div class="storage-summary" id="storageSummary"><div class="storage-ring" id="storageRing" style="--local:${localDegrees}deg"><span>♪</span></div><div class="storage-stat"><small>Local audio</small><strong id="storageLocalBytes">${formatBytes(localBytes)}</strong><span>${localTracks.length} available library ${localTracks.length === 1 ? "file" : "files"}</span></div><div class="storage-stat"><small>Server downloads</small><strong id="storageRemoteBytes">${formatBytes(remoteBytes)}</strong><span>${remoteTracks.length} available library ${remoteTracks.length === 1 ? "file" : "files"}</span></div><div class="storage-stat"><small>Available</small><strong id="storageAvailable">Calculating…</strong><span id="storageFreePercent">Disk space</span></div></div>
     <div class="segmented storage-tabs" role="group" aria-label="Storage scope"><button class="${storageScope === "songs" ? "active" : ""}" data-storage-scope="songs" aria-pressed="${storageScope === "songs"}">Songs</button><button class="${storageScope === "downloads" ? "active" : ""}" data-storage-scope="downloads" aria-pressed="${storageScope === "downloads"}">Downloads</button><button class="${storageScope === "files" ? "active" : ""}" data-storage-scope="files" aria-pressed="${storageScope === "files"}">Files</button></div>
-    ${storageEditing ? `<div class="selection-bar"><span>${selectedStorageIDs.size} selected</span><button class="danger" id="deleteSelectedStorage" ${selectedStorageIDs.size ? "" : "disabled"}>Delete selected</button></div>` : ""}
+    ${storageEditing ? `<div class="selection-bar"><span class="selection-bar-count"><span class="selection-bar-icon" aria-hidden="true">✓</span><span><strong>${selectedStorageIDs.size}</strong> selected</span></span><button class="danger" id="deleteSelectedStorage" ${selectedStorageIDs.size ? "" : "disabled"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5"/></svg><span>Delete selected</span></button></div>` : ""}
     <div class="storage-section-heading"><strong>${storageScope === "downloads" ? "DOWNLOADED FROM SERVER" : storageScope === "files" ? "IMPORTED ON THIS PC" : "ALL SONGS"}</strong><span>${tracks.length} songs</span></div>
     <div class="storage-list redesigned">${tracks.map((track) => {
       const unavailable = track.available === false || track.missing;
@@ -4406,7 +4424,7 @@ function renderStorage() {
         : unavailable
           ? `${title} by ${track.artist || "Unknown artist"}. Press Enter or Space for availability information`
           : `Play ${title} by ${track.artist || "Unknown artist"}. Press Enter or Space to play`;
-      return `<div class="storage-row ${storageEditing ? "selecting" : ""}${unavailable ? " unavailable" : ""}" data-storage-track="${escapeHTML(track.id)}" role="group" aria-label="${escapeHTML(`${title} actions`)}"><button type="button" class="row-primary-action" data-storage-activate="${escapeHTML(track.id)}" aria-label="${escapeHTML(storageActionLabel)}" aria-keyshortcuts="Enter Space Shift+F10" aria-disabled="${!storageEditing && unavailable}"></button><button class="storage-select ${selectedStorageIDs.has(track.id) ? "selected" : ""}" data-storage-select="${escapeHTML(track.id)}" aria-label="${selectedStorageIDs.has(track.id) ? "Deselect" : "Select"} ${escapeHTML(title)}" aria-pressed="${selectedStorageIDs.has(track.id)}" ${storageEditing ? "" : "hidden"}>${selectedStorageIDs.has(track.id) ? "✓" : "○"}</button>${artwork(track)}<span class="track-details"><strong>${escapeHTML(track.title)}</strong><small>${unavailable ? "File unavailable on this device" : `${escapeHTML(track.artist || "Unknown Artist")} • ${escapeHTML(displayAlbum(track))}`}</small></span><span class="storage-size">${unavailable ? "Missing" : formatBytes(track.size)}</span><button class="row-menu" data-storage-menu="${escapeHTML(track.id)}" title="More options" aria-label="More options for ${escapeHTML(title)}">•••</button></div>`;
+      return `<div class="storage-row ${storageEditing ? "selecting" : ""}${unavailable ? " unavailable" : ""}" data-storage-track="${escapeHTML(track.id)}" role="group" aria-label="${escapeHTML(`${title} actions`)}"><button type="button" class="row-primary-action" data-storage-activate="${escapeHTML(track.id)}" aria-label="${escapeHTML(storageActionLabel)}" aria-keyshortcuts="Enter Space Shift+F10" aria-disabled="${!storageEditing && unavailable}"></button><button class="storage-select ${selectedStorageIDs.has(track.id) ? "selected" : ""}" data-storage-select="${escapeHTML(track.id)}" aria-label="${selectedStorageIDs.has(track.id) ? "Deselect" : "Select"} ${escapeHTML(title)}" aria-pressed="${selectedStorageIDs.has(track.id)}" ${storageEditing ? "" : "hidden"}>${selectedStorageIDs.has(track.id) ? "✓" : "○"}</button>${artwork(track)}<span class="track-details"><strong>${escapeHTML(track.title)}</strong><small>${unavailable ? "File unavailable on this device" : `${escapeHTML(track.artist || "Unknown Artist")} • ${escapeHTML(displayAlbum(track))}`}</small></span><span class="storage-size">${unavailable ? "Missing" : formatBytes(track.size)}</span></div>`;
     }).join("") || `<div class="empty"><b>${storageEmptyTitle}</b><span>${storageEmptyHelp}</span></div>`}</div></div>`;
   const importControl = $("#storageImportControl");
   const importButton = $("#storageImportMenuButton");
@@ -4427,6 +4445,18 @@ function renderStorage() {
     importMenu.hidden = false;
     importButton.setAttribute("aria-expanded", "true");
     importControl.classList.add("open");
+    const buttonBounds = importButton.getBoundingClientRect();
+    const menuWidth = importMenu.offsetWidth;
+    const menuHeight = importMenu.offsetHeight;
+    const gutter = 12;
+    const left = Math.max(gutter, Math.min(buttonBounds.right - menuWidth, window.innerWidth - menuWidth - gutter));
+    const belowTop = buttonBounds.bottom + 8;
+    const aboveTop = buttonBounds.top - menuHeight - 8;
+    const top = belowTop + menuHeight <= window.innerHeight - gutter || aboveTop < gutter
+      ? Math.max(gutter, Math.min(belowTop, window.innerHeight - menuHeight - gutter))
+      : aboveTop;
+    importMenu.style.left = `${left}px`;
+    importMenu.style.top = `${top}px`;
     requestAnimationFrame(() => importOptions[0]?.focus());
     outsideImportPointerHandler = (event) => {
       if (!importControl.contains(event.target)) closeImportMenu();
@@ -4488,9 +4518,6 @@ function renderStorage() {
         openMenu(event);
       }
     };
-  });
-  document.querySelectorAll("[data-storage-menu]").forEach((button) => {
-    button.onclick = (event) => openTrackContextMenu(event, button.dataset.storageMenu, { source: "storage", playbackTracks: tracks, playlistID: null });
   });
   api.storageSummary().then((summary) => {
     if (section !== "storage") return;
@@ -5093,8 +5120,8 @@ function renderSettings() {
               </div>
               <div class="settings-row">
                 <span class="settings-row-icon" aria-hidden="true">${settingsIcons.update}</span>
-                <span class="settings-row-copy"><strong>Updates</strong><small id="settingsUpdateStatus">${escapeHTML($("#updateStatus").textContent || "Automatic in-app updates")}</small></span>
-                <button id="settingsCheckUpdates" class="settings-row-action" type="button">Check now</button>
+                <span class="settings-row-copy"><strong>Updates</strong><small id="settingsUpdateStatus">${escapeHTML(updateStatusMessage)}</small></span>
+                <span class="settings-automatic-badge">Automatic</span>
               </div>
               <div class="settings-row">
                 <span class="settings-row-icon" aria-hidden="true">${settingsIcons.refresh}</span>
@@ -5204,7 +5231,6 @@ function renderSettings() {
     renderSettings();
   };
   if ($("#settingsServer")) $("#settingsServer").onclick = openServerSettings;
-  if ($("#settingsCheckUpdates")) $("#settingsCheckUpdates").onclick = checkForUpdates;
   if ($("#settingsRefreshMetadata")) $("#settingsRefreshMetadata").onclick = refreshDownloadedSongMetadata;
 
   if (settingsPanel === "server") bindServerSettingsControls();
@@ -7437,6 +7463,8 @@ async function serverAction(mode) {
       serverConnected = true;
       hydrateServerCatalogArtwork(serverCatalog);
       if (section === "server") renderServer();
+      else if (section === "playlists") renderPlaylists();
+      else if (section === "library" && selectedPlaylistID) renderLibrary();
     }
     await persist();
     renderSidebar();
@@ -9988,7 +10016,7 @@ api.onLocalImportProgress((value) => {
   updateLocalImportTransfer(value);
 });
 function setUpdateStatus(message) {
-  $("#updateStatus").textContent = message;
+  updateStatusMessage = message;
   const settingsStatus = $("#settingsUpdateStatus");
   if (settingsStatus) settingsStatus.textContent = message;
 }
@@ -10097,7 +10125,6 @@ try {
 } catch {
   // Automatic checking still reports through update:status in installed builds.
 }
-$("#checkForUpdates").onclick = checkForUpdates;
 $("#installUpdate").onclick = installWindowsUpdate;
 $("#updateAvailableAction").onclick = () => {
   if (windowsUpdateReady || $("#updateAvailableAction").dataset.action === "install") void installWindowsUpdate();
@@ -10109,10 +10136,15 @@ $("#dismissUpdateAvailable").onclick = () => {
 };
 updateTopSearch();
 render(); updateChrome();
-void refreshClientConfig().then(() => {
-  persistInBackground({ refreshSidebar: false });
-  if (section === "server") renderServer();
-});
+if (state.serverURL && serverToken) {
+  serverAutoAttempted = true;
+  void serverAction("catalog");
+} else {
+  void refreshClientConfig().then(() => {
+    persistInBackground({ refreshSidebar: false });
+    if (section === "server") renderServer();
+  });
+}
 window.addEventListener("focus", () => {
   const activeConfig = activeServerClientConfig(clientConfig);
   const expiresSoon = activeConfig !== SAFE_CLIENT_CONFIG

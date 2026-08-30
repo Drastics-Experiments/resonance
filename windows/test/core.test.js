@@ -113,6 +113,20 @@ test("playlist artwork uses only the first four custom-playlist songs", () => {
   assert.deepEqual(playlistArtworkTrackIDs({ trackIDs, isSystem: true }), []);
 });
 
+test("playlist artwork hydrates from remote-only playlist entries", () => {
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  assert.match(appSource, /tracksForPlaylist\(state, playlist\?\.id, serverCatalog\)\.slice\(0, 4\)/);
+  assert.match(appSource, /data-playlist-artwork-remote-id/);
+  assert.match(appSource, /function updatePlaylistArtworkNodes\(song\)[\s\S]+squareArtworkImageMarkup\(source\)/);
+  assert.match(appSource, /hydrateServerArtwork\(song\)[\s\S]+updatePlaylistArtworkNodes\(song\)/);
+});
+
+test("starts catalog and metadata loading without opening the server page", () => {
+  const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
+  assert.match(appSource, /render\(\); updateChrome\(\);\s*if \(state\.serverURL && serverToken\) \{\s*serverAutoAttempted = true;\s*void serverAction\("catalog"\);/);
+  assert.match(appSource, /function replaceServerCatalog\(songs\)[\s\S]+hydrateServerCatalogMetadataArtwork\(serverCatalog, context, generation\);\s*hydrateServerCatalogMetadata\(serverCatalog\);/);
+});
+
 test("playable media duration overrides stale stored and mismatched video timelines", () => {
   assert.equal(playableMediaDuration({ storedDuration: 7_200, audioDuration: 217.4 }), 217.4);
   assert.equal(playableMediaDuration({ storedDuration: 7_200, audioDuration: 217.4, videoDuration: 216.9 }), 216.9);
@@ -977,9 +991,10 @@ test("binds the active library to the signed-in Clerk account", () => {
   assert.doesNotMatch(appSource, /id="syncProfile"|id="newSyncProfile"/);
   assert.match(appSource, /track\.id === currentID \? toggle\(\) : play\(track, tracks, \{ playlistID: null \}\)/);
   assert.match(appSource, /function updateProfileControl\(\)[\s\S]+control\.hidden = false/);
-  for (const id of ["settingsServer", "settingsCheckUpdates", "settingsRefreshMetadata"]) {
+  for (const id of ["settingsServer", "settingsRefreshMetadata"]) {
     assert.match(appSource, new RegExp(`id="${id}"`));
   }
+  assert.doesNotMatch(appSource, /id="settingsCheckUpdates"|id="checkForUpdates"/);
   assert.doesNotMatch(appSource, /Library & tools|data-settings-panel="tools"|id="settingsHistory"|id="settingsClipEditor"|id="settingsStorage"/);
   assert.match(htmlSource, /id="profileHistory"[\s\S]+id="profileClipEditor"/);
   assert.match(htmlSource, /data-section="storage"[\s\S]+Song Storage/);
@@ -2374,7 +2389,8 @@ test("installs downloaded Windows updates silently in place", () => {
   assert.match(mainSource, /installDownloadedWindowsUpdate\(autoUpdater\)/);
   assert.doesNotMatch(mainSource, /autoUpdater\.quitAndInstall\(false, true\)/);
   assert.match(appSource, /Restarting to finish the update/);
-  assert.match(htmlSource, /Automatic in-app updates/);
+  assert.doesNotMatch(htmlSource, /Check for updates|Automatic in-app updates/);
+  assert.match(appSource, /Updates are checked automatically/);
   assert.match(htmlSource, /Restart &amp; update/);
   assert.match(readmeSource, /runs the verified NSIS update silently/);
   assert.match(readmeSource, /does not show the setup wizard/);

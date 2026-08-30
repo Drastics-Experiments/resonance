@@ -32,43 +32,12 @@
 
 .update-panel {
   margin-top: auto;
-  padding-top: 12px;
-  border-top: 1px solid var(--line);
 }
 
-.update-panel > button:first-child {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  gap: 10px;
-  padding: 10px;
-  border-radius: 10px;
-  background: transparent;
-  text-align: left;
-}
-
-.update-panel > button:first-child:hover {
-  background: var(--menu-hover);
-}
-
-.update-panel strong,
-.update-panel small {
-  display: block;
-}
-
-.update-panel strong {
-  font-size: 10px;
-}
-
-.update-panel small {
-  margin-top: 3px;
-  color: var(--muted);
-  font-size: 9px;
-}
+.update-panel:has(#installUpdate[hidden]) { display: none; }
 
 #installUpdate {
   width: 100%;
-  margin-top: 7px;
   padding: 9px;
   border-radius: 9px;
   background: var(--action-background);
