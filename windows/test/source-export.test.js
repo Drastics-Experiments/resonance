@@ -78,6 +78,8 @@ test("source export path policy rejects secrets, app data, dependencies, and bui
     "../outside.txt",
     "/absolute/path.txt",
     "C:/absolute/path.txt",
+    "scratch/access-token.txt",
+    "scratch/admin-key.txt",
   ]) {
     assert.equal(sourceExportPathAllowed(relativePath), false, relativePath);
   }
@@ -112,6 +114,10 @@ test("source snapshot captures the working tree and emits a verifiable buildable
   await writeFixture(root, "installers/macos/dist/build.txt", "do not export\n");
   await writeFixture(root, "signing/distribution.p12", "do not export\n");
   await writeFixture(root, "private/.npmrc", "//registry.example.invalid/:_authToken=do-not-export\n");
+  await writeFixture(root, "scratch.txt", "Authorization: Bearer ghp_012345678901234567890123456789012345\n");
+  await writeFixture(root, "notes.txt", "admin_key = \"tailnet-preview-admin-key-value\"\n");
+  await writeFixture(root, "certificate.txt", "-----BEGIN PRIVATE KEY-----\ndo-not-export\n-----END PRIVATE KEY-----\n");
+  await writeFixture(root, "windows/auth-helper.mjs", "export const header = (token) => `Bearer ${token}`;\n");
   await writeFixture(root, "Local Music/song.flac", "do not export\n");
   await execFileAsync("git", ["add", "-f", "."], { cwd: root });
   await execFileAsync("git", ["update-index", "--chmod=+x", "scripts/build.sh"], { cwd: root });
@@ -166,6 +172,7 @@ test("source snapshot captures the working tree and emits a verifiable buildable
   assert.ok(entries.has("windows/pnpm-lock.yaml"));
   assert.equal(entries.get("README.md").contents.toString(), "working tree\n");
   assert.equal(entries.get("windows/new-source.mjs").contents.toString(), "export const current = true;\n");
+  assert.equal(entries.get("windows/auth-helper.mjs").contents.toString(), "export const header = (token) => `Bearer ${token}`;\n");
   assert.equal(entries.get("windows/.npmrc").contents.toString(), "node-linker=hoisted\n");
   assert.equal(entries.get("mac/electron-builder.yml").contents.toString(), "appId: example.preview\n");
   assert.equal(entries.get("scripts/build.sh").mode & 0o111, 0o111);
@@ -176,6 +183,9 @@ test("source snapshot captures the working tree and emits a verifiable buildable
     "installers/macos/dist/build.txt",
     "signing/distribution.p12",
     "private/.npmrc",
+    "scratch.txt",
+    "notes.txt",
+    "certificate.txt",
     "Local Music/song.flac",
   ]) {
     assert.equal(entries.has(excluded), false, excluded);

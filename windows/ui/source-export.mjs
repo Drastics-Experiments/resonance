@@ -84,7 +84,26 @@ const SENSITIVE_CONFIG_FILE_NAMES = new Set([
   "gradle.properties",
 ]);
 
+const CREDENTIAL_VALUE_FILE_SUFFIXES = new Set([
+  "",
+  ".conf",
+  ".config",
+  ".ini",
+  ".json",
+  ".plist",
+  ".properties",
+  ".toml",
+  ".txt",
+  ".yaml",
+  ".yml",
+]);
+
 const SENSITIVE_CONFIG_ASSIGNMENT = /^\s*(?:\/\/[^\r\n:=]+:)?[^\r\n=]*(?:_auth|auth[_-]?token|access[_-]?token|api[_-]?key|client[_-]?secret|password|private[_-]?key|signing|storefile|keyalias)[^\r\n=]*=/im;
+const CREDENTIAL_VALUE_FILE_NAME = /(?:^|[._-])(?:access[._-]?token|admin[._-]?key|api[._-]?key|auth[._-]?token|bearer[._-]?token|client[._-]?secret|private[._-]?key|refresh[._-]?token|password|secrets?|tokens?)$/i;
+const PRIVATE_KEY_BLOCK = /-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----/;
+const KNOWN_CREDENTIAL_LITERAL = /\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{16,}|sk_(?:live|test)_[A-Za-z0-9]{16,}|AKIA[A-Z0-9]{16})\b/;
+const BEARER_CREDENTIAL_LITERAL = /\bBearer[\t ]+([A-Za-z0-9._~+/=-]{16,})/gi;
+const GENERIC_CREDENTIAL_ASSIGNMENT = /(?:^|[,{;\n\r])\s*(?:export\s+)?(?:const\s+|let\s+|var\s+)?["']?(access[_-]?token|admin[_-]?key|api[_-]?key|auth[_-]?token|client[_-]?secret|password|private[_-]?key|refresh[_-]?token|secret|token)["']?\s*[:=]\s*["'`]([^"'`\r\n,;]{8,})["'`]/gim;
 
 const EXCLUDED_FILE_SUFFIXES = [
   ".cer",
@@ -198,20 +217,35 @@ export function sourceExportPathAllowed(relativePath) {
   const basename = loweredSegments.at(-1);
   if (EXCLUDED_FILE_NAMES.has(basename)) return false;
   if (EXCLUDED_FILE_SUFFIXES.some((suffix) => basename.endsWith(suffix))) return false;
+  const extension = path.posix.extname(basename);
+  const stem = extension ? basename.slice(0, -extension.length) : basename;
+  if (CREDENTIAL_VALUE_FILE_SUFFIXES.has(extension) && CREDENTIAL_VALUE_FILE_NAME.test(stem)) return false;
   return true;
 }
 
-function containsSensitiveConfig(relativePath, contents) {
+function looksLikeCredentialLiteral(value) {
+  const candidate = String(value || "").trim();
+  if (candidate.length < 8) return false;
+  return !/^(?:\$\{|<|\[|process\.env\b|import\.meta\.env\b|Deno\.env\b|REDACTED\b|CHANGEME\b|EXAMPLE\b|YOUR[_-])/i.test(candidate);
+}
+
+function containsCredentialMaterial(relativePath, contents) {
   const basename = path.posix.basename(relativePath).toLowerCase();
-  return SENSITIVE_CONFIG_FILE_NAMES.has(basename)
-    && SENSITIVE_CONFIG_ASSIGNMENT.test(contents.toString("utf8"));
+  const text = contents.toString("utf8");
+  if (PRIVATE_KEY_BLOCK.test(text) || KNOWN_CREDENTIAL_LITERAL.test(text)) return true;
+  if (SENSITIVE_CONFIG_FILE_NAMES.has(basename) && SENSITIVE_CONFIG_ASSIGNMENT.test(text)) return true;
+  BEARER_CREDENTIAL_LITERAL.lastIndex = 0;
+  for (const match of text.matchAll(BEARER_CREDENTIAL_LITERAL)) {
+    if (looksLikeCredentialLiteral(match[1])) return true;
+  }
+  GENERIC_CREDENTIAL_ASSIGNMENT.lastIndex = 0;
+  for (const match of text.matchAll(GENERIC_CREDENTIAL_ASSIGNMENT)) {
+    if (looksLikeCredentialLiteral(match[2])) return true;
+  }
+  return false;
 }
 
 async function collectSourceFiles(repoRoot, fileList, fileModes, mtime) {
-  if (fileList.length > MAX_SOURCE_FILES) {
-    throw new Error(`Source preview contains more than ${MAX_SOURCE_FILES} files.`);
-  }
-
   const entries = [];
   let totalBytes = 0;
   for (const relativePath of fileList) {
@@ -233,7 +267,7 @@ async function collectSourceFiles(repoRoot, fileList, fileModes, mtime) {
     if (!stat.isFile()) continue;
 
     const contents = await fs.readFile(absolutePath);
-    if (containsSensitiveConfig(relativePath, contents)) continue;
+    if (containsCredentialMaterial(relativePath, contents)) continue;
     totalBytes += contents.length;
     if (totalBytes > MAX_SOURCE_BYTES) {
       throw new Error(`Source preview is larger than ${MAX_SOURCE_BYTES} uncompressed bytes.`);
@@ -244,6 +278,9 @@ async function collectSourceFiles(repoRoot, fileList, fileModes, mtime) {
       contents,
       mtime,
     });
+    if (entries.length > MAX_SOURCE_FILES) {
+      throw new Error(`Source preview contains more than ${MAX_SOURCE_FILES} files.`);
+    }
   }
   const exportedPaths = new Set(entries.map((entry) => entry.relativePath));
   const missingRequired = REQUIRED_SOURCE_PATHS.filter((requiredPath) => !exportedPaths.has(requiredPath));
