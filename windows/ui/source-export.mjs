@@ -159,6 +159,31 @@ function decodedGitPaths(buffer) {
   return paths.sort();
 }
 
+function decodedGitIndexModes(buffer) {
+  const modes = new Map();
+  let start = 0;
+  for (let index = 0; index <= buffer.length; index += 1) {
+    if (index !== buffer.length && buffer[index] !== 0) continue;
+    if (index > start) {
+      const record = buffer.subarray(start, index);
+      const separator = record.indexOf(0x09);
+      if (separator < 0) throw new Error("Source preview Git index entry is invalid.");
+      const metadata = record.subarray(0, separator).toString("ascii").split(" ");
+      const encodedPath = record.subarray(separator + 1);
+      const relativePath = encodedPath.toString("utf8");
+      if (!Buffer.from(relativePath, "utf8").equals(encodedPath)) {
+        throw new Error("Source preview contains a file name that is not valid UTF-8.");
+      }
+      if (!/^[0-7]{6}$/.test(metadata[0] || "") || metadata[2] !== "0") {
+        throw new Error(`Source preview Git index entry is unsupported: ${relativePath}`);
+      }
+      modes.set(relativePath, Number.parseInt(metadata[0], 8) & 0o777);
+    }
+    start = index + 1;
+  }
+  return modes;
+}
+
 export function sourceExportPathAllowed(relativePath) {
   if (typeof relativePath !== "string" || !relativePath || relativePath.includes("\0")) return false;
   if (path.posix.isAbsolute(relativePath) || relativePath.includes("\\")) return false;
@@ -182,7 +207,7 @@ function containsSensitiveConfig(relativePath, contents) {
     && SENSITIVE_CONFIG_ASSIGNMENT.test(contents.toString("utf8"));
 }
 
-async function collectSourceFiles(repoRoot, fileList, mtime) {
+async function collectSourceFiles(repoRoot, fileList, fileModes, mtime) {
   if (fileList.length > MAX_SOURCE_FILES) {
     throw new Error(`Source preview contains more than ${MAX_SOURCE_FILES} files.`);
   }
@@ -213,7 +238,12 @@ async function collectSourceFiles(repoRoot, fileList, mtime) {
     if (totalBytes > MAX_SOURCE_BYTES) {
       throw new Error(`Source preview is larger than ${MAX_SOURCE_BYTES} uncompressed bytes.`);
     }
-    entries.push({ relativePath, mode: stat.mode, contents, mtime });
+    entries.push({
+      relativePath,
+      mode: fileModes.get(relativePath) ?? stat.mode,
+      contents,
+      mtime,
+    });
   }
   const exportedPaths = new Set(entries.map((entry) => entry.relativePath));
   const missingRequired = REQUIRED_SOURCE_PATHS.filter((requiredPath) => !exportedPaths.has(requiredPath));
@@ -221,6 +251,21 @@ async function collectSourceFiles(repoRoot, fileList, mtime) {
     throw new Error(`Source preview is missing required launcher files: ${missingRequired.join(", ")}`);
   }
   return entries;
+}
+
+function sourceEntriesFingerprint(entries) {
+  const fingerprint = createHash("sha256");
+  for (const entry of entries) {
+    const encodedPath = Buffer.from(entry.relativePath, "utf8");
+    const metadata = Buffer.alloc(12);
+    metadata.writeUInt32LE(encodedPath.length, 0);
+    metadata.writeUInt32LE(entry.mode & 0o777, 4);
+    metadata.writeUInt32LE(entry.contents.length, 8);
+    fingerprint.update(metadata);
+    fingerprint.update(encodedPath);
+    fingerprint.update(entry.contents);
+  }
+  return fingerprint.digest("hex");
 }
 
 const CRC32_TABLE = Object.freeze(Array.from({ length: 256 }, (_, index) => {
@@ -312,12 +357,13 @@ async function buildZip(entries) {
 }
 
 async function repositoryState(repoRoot) {
-  const [commitBuffer, branchBuffer, statusBuffer, timestampBuffer, filesBuffer] = await Promise.all([
+  const [commitBuffer, branchBuffer, statusBuffer, timestampBuffer, filesBuffer, indexBuffer] = await Promise.all([
     runGit(repoRoot, ["rev-parse", "HEAD"]),
     runGit(repoRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFailure: true }),
     runGit(repoRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"]),
     runGit(repoRoot, ["show", "-s", "--format=%ct", "HEAD"]),
     runGit(repoRoot, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]),
+    runGit(repoRoot, ["ls-files", "--stage", "-z"]),
   ]);
   const commit = decodedGitText(commitBuffer);
   const commitTimestamp = Number(decodedGitText(timestampBuffer));
@@ -328,8 +374,17 @@ async function repositoryState(repoRoot) {
     commit,
     commitTimestamp,
     dirty: statusBuffer.length > 0,
-    fingerprint: Buffer.concat([commitBuffer, Buffer.from([0]), statusBuffer]).toString("base64"),
+    fingerprint: Buffer.concat([
+      commitBuffer,
+      Buffer.from([0]),
+      statusBuffer,
+      Buffer.from([0]),
+      filesBuffer,
+      Buffer.from([0]),
+      indexBuffer,
+    ]).toString("base64"),
     files: decodedGitPaths(filesBuffer),
+    fileModes: decodedGitIndexModes(indexBuffer),
   };
 }
 
@@ -348,9 +403,24 @@ export async function createSourceSnapshot({
   let entries;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     state = await repositoryState(root);
-    entries = await collectSourceFiles(root, state.files, state.commitTimestamp);
+    const firstEntries = await collectSourceFiles(root, state.files, state.fileModes, state.commitTimestamp);
     const verifiedState = await repositoryState(root);
-    if (state.fingerprint === verifiedState.fingerprint) break;
+    const verifiedEntries = await collectSourceFiles(
+      root,
+      verifiedState.files,
+      verifiedState.fileModes,
+      verifiedState.commitTimestamp,
+    );
+    const finalState = await repositoryState(root);
+    if (
+      state.fingerprint === verifiedState.fingerprint
+      && verifiedState.fingerprint === finalState.fingerprint
+      && sourceEntriesFingerprint(firstEntries) === sourceEntriesFingerprint(verifiedEntries)
+    ) {
+      state = verifiedState;
+      entries = verifiedEntries;
+      break;
+    }
     if (attempt === 1) throw new Error("The repository changed while creating the source preview. Try again.");
   }
 

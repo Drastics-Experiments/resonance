@@ -114,6 +114,7 @@ test("source snapshot captures the working tree and emits a verifiable buildable
   await writeFixture(root, "private/.npmrc", "//registry.example.invalid/:_authToken=do-not-export\n");
   await writeFixture(root, "Local Music/song.flac", "do not export\n");
   await execFileAsync("git", ["add", "-f", "."], { cwd: root });
+  await execFileAsync("git", ["update-index", "--chmod=+x", "scripts/build.sh"], { cwd: root });
   await execFileAsync("git", [
     "-c", "user.name=Preview Test",
     "-c", "user.email=preview@example.invalid",
