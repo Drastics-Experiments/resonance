@@ -94,6 +94,18 @@ if [[ "${CSC_IDENTITY_AUTO_DISCOVERY:-false}" == "0" ]]; then
 fi
 export CSC_IDENTITY_AUTO_DISCOVERY="${CSC_IDENTITY_AUTO_DISCOVERY:-false}"
 
+# electron-builder treats an explicitly empty certificate link as a relative
+# path. In development CI that resolves to the windows/ project directory and
+# fails with "windows not a file"; an empty link should mean no certificate.
+# Keep any non-empty links, and all production signing inputs, unchanged.
+if [[ "$MAC_UPDATE_AUTHENTICITY" == "development" ]]; then
+    [[ -n "${CSC_LINK:-}" ]] || unset CSC_LINK
+    [[ -n "${CSC_INSTALLER_LINK:-}" ]] || unset CSC_INSTALLER_LINK
+    # electron-builder otherwise skips all macOS signing on pull requests,
+    # including the requested ad-hoc identity=- signature.
+    export CSC_FOR_PULL_REQUEST=true
+fi
+
 ffmpeg_supports_arch() {
     local architecture="$1"
     local details

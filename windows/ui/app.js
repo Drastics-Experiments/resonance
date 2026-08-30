@@ -92,6 +92,9 @@ import {
 import { createMediaSessionController } from "./media-session.js";
 
 const api = window.resonance;
+if (!api || typeof api.loadLibrary !== "function") {
+  throw new Error("Resonance requires the Electron preload bridge.");
+}
 let audio = document.querySelector("#audio");
 let crossfadeAudio = document.querySelector("#crossfadeAudio");
 const clipEditorPreviewAudio = document.querySelector("#clipEditorPreview");
@@ -1282,8 +1285,8 @@ async function loadClipEditorVideoFrames(track, count = 12) {
         return;
       }
     } catch {
-      // The browser fallback below still works for media sources that permit
-      // pixel reads from the renderer's origin.
+      // The renderer/canvas fallback below still works for media sources that
+      // permit pixel reads from the app's file origin.
     }
   }
   const video = document.createElement("video");
@@ -6230,15 +6233,12 @@ function updateLocalImportSyncForSelection({ preserveChecked = false } = {}) {
   const row = $("#localImportSyncRow");
   if (!preserveChecked) {
     sync.checked = true;
-    if (api["browser"]) sync.checked = false;
   }
   sync.disabled = serverBacked;
   syncTransitionToggle(sync);
   row.classList.toggle("disabled", serverBacked);
   row.title = serverBacked
     ? "This source is already saved to the active server profile."
-      : api["browser"]
-        ? "Browser test mode keeps imports on this device fixture."
       : canSync
       ? "Upload a copy to the active server profile after downloading."
       : "Sign in to your Resonance account before importing to upload this copy.";
@@ -9161,11 +9161,6 @@ document.querySelectorAll("dialog.t-modal").forEach((dialog) => {
     dialog.classList.remove("is-open", "is-closing");
   });
 });
-if (api["browser"]) {
-  $("#browserPreviewBar").hidden = false;
-  $("#resetBrowserPreview").onclick = () => api.resetBrowserState();
-}
-
 $("#nowPlayingDialog").addEventListener("animationend", (event) => {
   if (event.target === $("#nowPlayingDialog") && event.animationName === "full-player-slide-out") {
     finishNowPlayingClose();

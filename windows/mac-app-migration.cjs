@@ -54,19 +54,25 @@ const FILE_CREDENTIAL_KEYS = Object.freeze({
 function nativeMacPaths({ homeDirectory, targetUserData = null } = {}) {
   const home = String(homeDirectory || process.env.HOME || "").trim();
   if (!home) throw new Error("A macOS home directory is required for persistence migration.");
-  const applicationSupport = path.join(home, "Library", "Application Support");
-  const nativeSupport = path.join(applicationSupport, MAC_NATIVE_APPLICATION_SUPPORT_NAME);
+  // Resolve every native root from the same absolute base. On Windows the
+  // fixture paths used for the macOS migration tests are rooted POSIX-style
+  // paths (for example `/Users/example`); `path.join` leaves those as
+  // drive-relative paths while targetUserData is normalized by `path.resolve`.
+  // Resolving both sides keeps the identity comparison stable without
+  // changing the normal macOS paths.
+  const applicationSupport = path.resolve(home, "Library", "Application Support");
+  const nativeSupport = path.resolve(applicationSupport, MAC_NATIVE_APPLICATION_SUPPORT_NAME);
   const electronUserData = targetUserData
     ? path.resolve(String(targetUserData))
     : nativeSupport;
   return {
-    preferences: path.join(home, "Library", "Preferences", `${MAC_NATIVE_BUNDLE_IDENTIFIER}.plist`),
+    preferences: path.resolve(home, "Library", "Preferences", `${MAC_NATIVE_BUNDLE_IDENTIFIER}.plist`),
     nativeSupport,
     electronUserData,
-    legacySupport: MAC_LEGACY_APPLICATION_SUPPORT_NAMES.map((name) => path.join(applicationSupport, name)),
-    nativeCredentials: path.join(nativeSupport, "server-credentials.json"),
-    electronCredentials: path.join(electronUserData, "server-credentials.json"),
-    electronAccountSession: path.join(electronUserData, "account-session.json"),
+    legacySupport: MAC_LEGACY_APPLICATION_SUPPORT_NAMES.map((name) => path.resolve(applicationSupport, name)),
+    nativeCredentials: path.resolve(nativeSupport, "server-credentials.json"),
+    electronCredentials: path.resolve(electronUserData, "server-credentials.json"),
+    electronAccountSession: path.resolve(electronUserData, "account-session.json"),
   };
 }
 
@@ -151,13 +157,24 @@ function nativeFilePath(value) {
   if (typeof value !== "string" || !value.trim()) return null;
   const candidate = value.trim();
   try {
-    if (candidate.startsWith("file:")) return fileURLToPath(candidate);
+    if (candidate.startsWith("file:")) {
+      // Native macOS URLs contain POSIX paths even when this migration module
+      // is exercised by a Windows CI runner. Force POSIX URL conversion for
+      // drive-less URLs; retain the host conversion for a drive-qualified
+      // file URL that may have come from a cross-platform fixture.
+      const urlPath = new URL(candidate).pathname;
+      return /^\/[A-Za-z]:\//.test(urlPath)
+        ? fileURLToPath(candidate)
+        : fileURLToPath(candidate, { windows: false });
+    }
   } catch {
     return null;
   }
-  // URL Codable normally emits a file URL. Keep an absolute POSIX path as a
-  // compatibility fallback for the oldest native library records.
-  return candidate.startsWith("/") ? path.resolve(candidate) : null;
+  // URL Codable normally emits a file URL. Keep absolute POSIX and host-native
+  // paths as compatibility fallbacks for older native library records and
+  // cross-platform fixtures.
+  if (path.posix.isAbsolute(candidate)) return path.posix.normalize(candidate);
+  return path.isAbsolute(candidate) ? path.normalize(candidate) : null;
 }
 
 function rewriteMigratedPath(filePath, pathMappings = []) {

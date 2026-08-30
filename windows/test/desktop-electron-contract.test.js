@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { createBrowserResonanceAPI } from "../ui/browser-runtime.js";
 import clientConfig from "../client-config.cjs";
 import macMigration from "../mac-app-migration.cjs";
 
@@ -17,16 +16,6 @@ const {
   migrateMacNativeData,
   nativeMacState,
 } = macMigration;
-
-function memoryStorage() {
-  const values = new Map();
-  return {
-    getItem: (key) => values.get(key) ?? null,
-    setItem: (key, value) => values.set(key, String(value)),
-    removeItem: (key) => values.delete(key),
-    entries: () => [...values.entries()],
-  };
-}
 
 test("shared Electron sources retain the Windows target and macOS release contract", async () => {
   assert.equal(packageJSON.main, "main.cjs");
@@ -52,26 +41,20 @@ test("shared Electron sources retain the Windows target and macOS release contra
   assert.match(macBuildScript, /electron-builder/);
   assert.match(macBuildScript, /--mac/);
   assert.match(macBuildScript, /WINDOWS_DIR/);
+  assert.match(
+    macBuildScript,
+    /MAC_UPDATE_AUTHENTICITY[\s\S]*development[\s\S]*unset CSC_LINK[\s\S]*unset CSC_INSTALLER_LINK/,
+    "development packaging must not pass blank certificate paths to electron-builder",
+  );
+  assert.match(
+    macBuildScript,
+    /if \[\[ "\$MAC_UPDATE_AUTHENTICITY" == "development" \]\]; then[\s\S]*export CSC_FOR_PULL_REQUEST=true/,
+    "development packaging must allow ad-hoc signing on CI pull requests",
+  );
   assert.doesNotMatch(macBuildScript, /swift\s+(build|run|test)/i);
   assert.match(`${macReadme}\n${windowsReadme}`, /Electron/i);
   assert.match(macReadme, /Resonance-macOS\.zip/);
   assert.match(macReadme, /Resonance-Installer\.pkg/);
-});
-
-test("browser bridge keeps credentials out of browser persistence", async () => {
-  const storage = memoryStorage();
-  const api = createBrowserResonanceAPI({ storage });
-
-  await api.saveServerCredentials({
-    clientToken: "should-not-be-stored",
-    adminToken: "should-not-be-stored-either",
-  });
-  assert.deepEqual(await api.loadServerCredentials(), { clientToken: "", adminToken: "" });
-
-  const serializedStorage = JSON.stringify(storage.entries());
-  assert.doesNotMatch(serializedStorage, /should-not-be-stored/);
-  assert.equal(api.browser, true);
-  assert.equal(api.browserRuntimeVersion, "1");
 });
 
 test("shared desktop client-config audiences distinguish Windows and macOS explicitly", () => {
@@ -116,14 +99,17 @@ test("macOS no longer retains a native Swift app target", async () => {
   assert.doesNotMatch(workflow, /swift\s+(build|run|test)|swift package|mac\/(?:Package|Sources|Tests)/i);
 });
 
-test("the shared renderer has no platform-specific duplicate required for macOS", async () => {
-  const [renderer, browserRuntime] = await Promise.all([
+test("the shared renderer requires Electron and has no browser fixture bridge", async () => {
+  const [renderer, html, preload] = await Promise.all([
     readFile(path.join(windowsRoot, "ui/app.js"), "utf8"),
-    readFile(path.join(windowsRoot, "ui/browser-runtime.js"), "utf8"),
+    readFile(path.join(windowsRoot, "ui/index.html"), "utf8"),
+    readFile(path.join(windowsRoot, "preload.cjs"), "utf8"),
   ]);
   assert.match(renderer, /from \"\.\/core\.js\"/);
-  assert.match(browserRuntime, /createBrowserResonanceAPI/);
-  assert.doesNotMatch(browserRuntime, /require\(["']electron["']\)|from\s+["']electron["']/i);
+  assert.match(renderer, /requires the Electron preload bridge/);
+  assert.doesNotMatch(renderer, /api\["browser"\]|resetBrowserState/);
+  assert.doesNotMatch(html, /browser-runtime\.js|browserPreviewBar|Reset demo/);
+  assert.match(preload, /contextBridge\.exposeInMainWorld\("resonance"/);
 });
 
 function encodedJSON(value) {
