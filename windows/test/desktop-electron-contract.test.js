@@ -41,6 +41,11 @@ test("shared Electron sources retain the Windows target and macOS release contra
   assert.match(macBuildScript, /electron-builder/);
   assert.match(macBuildScript, /--mac/);
   assert.match(macBuildScript, /WINDOWS_DIR/);
+  assert.match(
+    macBuildScript,
+    /MAC_UPDATE_AUTHENTICITY[\s\S]*development[\s\S]*unset CSC_LINK[\s\S]*unset CSC_INSTALLER_LINK/,
+    "development packaging must not pass blank certificate paths to electron-builder",
+  );
   assert.doesNotMatch(macBuildScript, /swift\s+(build|run|test)/i);
   assert.match(`${macReadme}\n${windowsReadme}`, /Electron/i);
   assert.match(macReadme, /Resonance-macOS\.zip/);
