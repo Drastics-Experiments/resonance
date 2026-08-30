@@ -119,12 +119,15 @@ test("playlist artwork hydrates from remote-only playlist entries", () => {
   assert.match(appSource, /data-playlist-artwork-remote-id/);
   assert.match(appSource, /function updatePlaylistArtworkNodes\(song\)[\s\S]+squareArtworkImageMarkup\(source\)/);
   assert.match(appSource, /hydrateServerArtwork\(song\)[\s\S]+updatePlaylistArtworkNodes\(song\)/);
+  assert.match(appSource, /function playlistArtworkCatalogSongs\(songs = serverCatalog\)[\s\S]+tracksForPlaylist\(state, playlist\.id, songs\)\.slice\(0, 4\)/);
+  assert.match(appSource, /function renderSidebar\(\)[\s\S]+hydratePlaylistArtwork\(serverCatalog\)/);
 });
 
 test("starts catalog and metadata loading without opening the server page", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
-  assert.match(appSource, /render\(\); updateChrome\(\);\s*if \(state\.serverURL && serverToken\) \{\s*serverAutoAttempted = true;\s*void serverAction\("catalog"\);/);
+  assert.match(appSource, /render\(\); updateChrome\(\);\s*if \(state\.serverURL && serverToken\) \{\s*serverAutoAttempted = true;\s*void serverAction\("catalog", \{ background: true, artworkScope: "playlists" \}\);/);
   assert.match(appSource, /function replaceServerCatalog\(songs\)[\s\S]+hydrateServerCatalogMetadataArtwork\(serverCatalog, context, generation\);\s*hydrateServerCatalogMetadata\(serverCatalog\);/);
+  assert.match(appSource, /async function serverAction\(mode, \{ background = false, artworkScope = "catalog" \} = \{\}\)[\s\S]+if \(!serverTransferCancelRequested && !background\) showNotice\(serverConnectionText\)/);
 });
 
 test("playable media duration overrides stale stored and mismatched video timelines", () => {

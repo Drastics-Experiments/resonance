@@ -3670,6 +3670,27 @@ function hydrateServerCatalogArtwork(songs) {
   void Promise.allSettled(workers);
 }
 
+function playlistArtworkCatalogSongs(songs = serverCatalog) {
+  const catalogByID = new Map((Array.isArray(songs) ? songs : [])
+    .filter((song) => song?.id)
+    .map((song) => [String(song.id), song]));
+  const requiredSongs = new Map();
+  state.playlists.filter((playlist) => !playlist.isSystem).forEach((playlist) => {
+    tracksForPlaylist(state, playlist.id, songs).slice(0, 4).forEach((track) => {
+      const source = track?.artwork;
+      if (typeof source === "string" && source && !/^https?:/i.test(source)) return;
+      const remoteID = String(track?.remoteID || "").trim();
+      const song = remoteID ? catalogByID.get(remoteID) : null;
+      if (song) requiredSongs.set(remoteID, song);
+    });
+  });
+  return [...requiredSongs.values()];
+}
+
+function hydratePlaylistArtwork(songs = serverCatalog) {
+  hydrateServerCatalogArtwork(playlistArtworkCatalogSongs(songs));
+}
+
 function cachedServerSongMetadata(song) {
   const key = remoteSongMetadataCacheKey(song?.source_url, song?.media_kind);
   return key ? state.remoteSongMetadataCache?.[key] || null : null;
@@ -4818,6 +4839,7 @@ function renderServer() {
   $("#uploadServer").onclick = uploadServerSongs;
   $("#syncServerPlaylists").onclick = () => syncPlaylistsNow();
   bindServerArtworkLoadStates();
+  hydrateServerCatalogArtwork(filteredServerCatalog());
   bindRemoteRows();
   document.querySelectorAll("[data-retry-upload-manifest]").forEach((button) => {
     button.onclick = () => retryServerUploadManifest(button.dataset.retryUploadManifest);
@@ -7373,7 +7395,7 @@ function updateLocalImportTransfer(value = {}) {
   });
 }
 
-async function serverAction(mode) {
+async function serverAction(mode, { background = false, artworkScope = "catalog" } = {}) {
   if (serverConnectInFlight) {
     serverConnectPending = true;
     return;
@@ -7382,7 +7404,7 @@ async function serverAction(mode) {
   try {
     await saveServerForm();
   } catch (error) {
-    showNotice(error.message || "The server connection cannot change during a transfer.");
+    if (!background) showNotice(error.message || "The server connection cannot change during a transfer.");
     return;
   }
   if (mode !== "catalog" && currentServerTransferModes().downloadMode !== "verified_file_cache") {
@@ -7461,7 +7483,8 @@ async function serverAction(mode) {
       replaceServerCatalog(catalog.songs);
       markServerCatalogAuthoritative(context);
       serverConnected = true;
-      hydrateServerCatalogArtwork(serverCatalog);
+      if (artworkScope === "playlists") hydratePlaylistArtwork(serverCatalog);
+      else hydrateServerCatalogArtwork(serverCatalog);
       if (section === "server") renderServer();
       else if (section === "playlists") renderPlaylists();
       else if (section === "library" && selectedPlaylistID) renderLibrary();
@@ -7480,7 +7503,7 @@ async function serverAction(mode) {
     replaceServerCatalog([]);
     selectedRemoteIDs.clear();
     serverSelecting = false;
-    if (!serverTransferCancelRequested) showNotice(serverConnectionText);
+    if (!serverTransferCancelRequested && !background) showNotice(serverConnectionText);
   } finally {
     serverConnectInFlight = false;
     if (mode !== "catalog") {
@@ -8027,6 +8050,7 @@ function newPlaylist(trackID = null) {
 function renderSidebar() {
   normalizeState(state);
   $("#sidebarPlaylists").innerHTML = state.playlists.map((playlist) => `<button data-side-playlist="${escapeHTML(playlist.id)}" aria-keyshortcuts="Shift+F10">${playlistArtworkMarkup(playlist, { className: "playlist-sidebar-art", tagName: "span" })}<div><strong>${escapeHTML(playlist.name)}</strong><small>${tracksForPlaylist(state, playlist.id, serverCatalog).length} tracks</small></div></button>`).join("");
+  hydratePlaylistArtwork(serverCatalog);
   document.querySelectorAll("[data-side-playlist]").forEach((button) => {
     button.onclick = () => navigate("library", button.dataset.sidePlaylist);
     button.oncontextmenu = (event) => openPlaylistContextMenu(event, button.dataset.sidePlaylist);
@@ -10138,7 +10162,7 @@ updateTopSearch();
 render(); updateChrome();
 if (state.serverURL && serverToken) {
   serverAutoAttempted = true;
-  void serverAction("catalog");
+  void serverAction("catalog", { background: true, artworkScope: "playlists" });
 } else {
   void refreshClientConfig().then(() => {
     persistInBackground({ refreshSidebar: false });
