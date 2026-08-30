@@ -26,11 +26,12 @@ installs it over Apple's device connection.
 - Every install must query GitHub's latest public release and require the exact
   versioned device IPA and SHA-256 sidecar from that release. There is no
   bundled IPA, persistent cache, file picker, or local fallback.
-- The public release contract is now fourteen assets: the previous twelve plus
-  `Resonance-iOS-Device-<version>.ipa` and its SHA-256 sidecar. The local Release
-  Studio project outside this worktree still has twelve-file wording and an
-  expected-assets list that must be updated before it can publish this expanded
-  contract.
+- Public v2.0.3 is the one transitional fourteen-asset release: the previous
+  twelve plus `Resonance-iOS-Device-<version>.ipa` and its SHA-256 sidecar.
+  Future releases use an eighteen-asset contract that also includes versioned
+  Windows and macOS iPhone Installer companions and both SHA-256 sidecars.
+  Release Studio must accept the exact v2.0.3 transition without permitting a
+  future fourteen-asset candidate.
 - Successful installs are tracked locally by iPhone UDID. Keep one current
   metadata-only record per device with its display name, Resonance version,
   install time, and refresh deadline. This ledger must not contain Apple

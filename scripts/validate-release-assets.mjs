@@ -10,8 +10,10 @@ function fail(message) {
   throw new Error(message);
 }
 
-function expectedAssetNames(version) {
+export function expectedAssetNames(version) {
   const windowsInstaller = `Resonance-Setup-${version}.exe`;
+  const iphoneWindowsInstaller = `Resonance-iPhone-Installer-Windows-${version}.exe`;
+  const iphoneMacArchive = `Resonance-iPhone-Installer-macOS-${version}.zip`;
   const androidPackage = `Resonance-Android-${version}.apk`;
   const iosArchive = `Resonance-iOS-Simulator-${version}.zip`;
   const iosDevicePackage = `Resonance-iOS-Device-${version}.ipa`;
@@ -23,6 +25,10 @@ function expectedAssetNames(version) {
     windowsInstaller,
     `${windowsInstaller}.blockmap`,
     "latest.yml",
+    iphoneWindowsInstaller,
+    `${iphoneWindowsInstaller}.sha256`,
+    iphoneMacArchive,
+    `${iphoneMacArchive}.sha256`,
     androidPackage,
     `${androidPackage}.sha256`,
     "latest-android.json",
@@ -124,6 +130,8 @@ export function validateReleaseAssets(
   }
   const assetDirectory = path.resolve(assetDirectoryArgument);
   const windowsInstaller = `Resonance-Setup-${version}.exe`;
+  const iphoneWindowsInstaller = `Resonance-iPhone-Installer-Windows-${version}.exe`;
+  const iphoneMacArchive = `Resonance-iPhone-Installer-macOS-${version}.zip`;
   const androidPackage = `Resonance-Android-${version}.apk`;
   const iosArchive = `Resonance-iOS-Simulator-${version}.zip`;
   const iosDevicePackage = `Resonance-iOS-Device-${version}.ipa`;
@@ -174,6 +182,8 @@ export function validateReleaseAssets(
   }
 
   const macSha256 = validateSha256Sidecar("Resonance-macOS.zip");
+  validateSha256Sidecar(iphoneWindowsInstaller);
+  validateSha256Sidecar(iphoneMacArchive);
   validateSha256Sidecar(androidPackage);
   validateSha256Sidecar(iosArchive);
   validateSha256Sidecar(iosDevicePackage);

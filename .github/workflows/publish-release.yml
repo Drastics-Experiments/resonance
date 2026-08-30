@@ -177,6 +177,10 @@ jobs:
               "Resonance-Setup-${VERSION}.exe"
               "Resonance-Setup-${VERSION}.exe.blockmap"
               latest.yml
+              "Resonance-iPhone-Installer-Windows-${VERSION}.exe"
+              "Resonance-iPhone-Installer-Windows-${VERSION}.exe.sha256"
+              "Resonance-iPhone-Installer-macOS-${VERSION}.zip"
+              "Resonance-iPhone-Installer-macOS-${VERSION}.zip.sha256"
               "Resonance-Android-${VERSION}.apk"
               "Resonance-Android-${VERSION}.apk.sha256"
               latest-android.json
@@ -213,7 +217,7 @@ jobs:
           RELEASE_TARGET: ${{ steps.verify.outputs.release_target }}
         run: |
           assets=(candidate/assets/*)
-          [[ "${#assets[@]}" -eq 14 ]]
+          [[ "${#assets[@]}" -eq 18 ]]
           DESKTOP_SIGNING="$(node -e 'const value = require("./release/policy.json"); process.stdout.write(value.desktopSigning)')"
           [[ "$DESKTOP_SIGNING" == "production" ]]
           release_arguments=(
@@ -229,7 +233,7 @@ jobs:
 
           RELEASE_JSON="$(gh release view "$TAG" --repo "$REPOSITORY" --json isDraft,assets,url)"
           [[ "$(jq -r '.isDraft' <<< "$RELEASE_JSON")" == "false" ]]
-          [[ "$(jq '.assets | length' <<< "$RELEASE_JSON")" -eq 14 ]]
+          [[ "$(jq '.assets | length' <<< "$RELEASE_JSON")" -eq 18 ]]
           TAG_TARGET="$(gh api "repos/${REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha')"
           [[ "$TAG_TARGET" == "$RELEASE_TARGET" ]]
           echo "Published $(jq -r '.url' <<< "$RELEASE_JSON")"

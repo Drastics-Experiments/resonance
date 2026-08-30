@@ -107,11 +107,12 @@ Current workflows:
 .github/workflows/ios.yml
 .github/workflows/windows.yml
 .github/workflows/android.yml
+.github/workflows/iphone-installer.yml
 .github/workflows/release-candidate.yml
 .github/workflows/publish-release.yml
 ```
 
-- The four platform workflows remain independent native builds. They run normal path-filtered PR CI and can also be called by `release-candidate.yml`; they do not publish GitHub Releases and no longer rebuild on a pushed tag.
+- The four platform workflows remain independent native builds, and `iphone-installer.yml` builds the Windows and macOS iPhone companion installers. They run normal path-filtered PR CI and can also be called by `release-candidate.yml`; they do not publish GitHub Releases and no longer rebuild on a pushed tag.
 - Relevant pushes to `main` also run the platform workflows to populate trusted Gradle, Xcode DerivedData, pnpm, and Electron packaging caches. Pull requests restore these default-branch caches but do not update the shared cache. Do not remove this warm-cache path when optimizing CI.
 - macOS PRs run the shared Electron desktop tests and build the app ZIP, checksum, installer PKG, and updater manifest.
 - Windows PRs install with pnpm, run tests, and build the NSIS EXE, blockmap, and `latest.yml`.
@@ -122,7 +123,7 @@ Current workflows:
 
 The release pipeline builds once, validates one combined candidate, and lets only Release Studio write the public release. Do not restore per-platform publishing or let multiple platform jobs write to one public release.
 
-The preferred interactive publisher is the local native app at `local-projects/release-publisher/`. It reads the latest public semantic release and annotated direct-release tag to choose the next patch version and monotonically increasing build number, then dispatches `.github/workflows/direct-release-build.yml` at the exact latest `main` SHA. GitHub Actions applies those version values only inside the four isolated platform runners, validates the combined twelve-file candidate, and returns the artifacts to Release Studio. Release Studio creates the final annotated version tag and GitHub Release with the user-supplied title and notes.
+The preferred interactive publisher is the local native app at `local-projects/release-publisher/`. It reads the latest public semantic release and annotated direct-release tag to choose the next patch version and monotonically increasing build number, then dispatches `.github/workflows/direct-release-build.yml` at the exact latest `main` SHA. GitHub Actions applies those version values only inside the four isolated platform runners plus the iPhone installer companion runner, validates the combined eighteen-file candidate, and returns the artifacts to Release Studio. Release Studio creates the final annotated version tag and GitHub Release with the user-supplied title and notes.
 
 This direct release path creates no PR, branch, merge, source commit, or change to `main`. `release/version.json` remains the checked-in baseline floor for version synchronization; newer direct releases record their build number in the annotated release tag. The version synchronization tool still updates and validates Windows, Android, iOS, and macOS metadata inside build workspaces:
 
@@ -137,11 +138,11 @@ The legacy PR-based release command remains available for recovery or an explici
 /Users/lilydietrich/Documents/Resonance/scripts/release-now.mjs
 ```
 
-The command increments the patch version and build number, creates exactly one `release/v<version>` PR, waits for all four platform builds in parallel, merges only after the bundled candidate passes, publishes the already-built artifacts without a second build, and verifies the exact public release. It can be run from any working directory because it resolves the repository relative to the script. Use `--dry-run` for a mutation-free preflight or `--version <version> --build <number>` for explicit metadata. Rerun it on an existing release branch to resume an interrupted release; add `--retry-failed` to rerun failed jobs.
+The command increments the patch version and build number, creates exactly one `release/v<version>` PR, waits for all four platform builds and the iPhone companion builds in parallel, merges only after the bundled candidate passes, publishes the already-built artifacts without a second build, and verifies the exact public release. It can be run from any working directory because it resolves the repository relative to the script. Use `--dry-run` for a mutation-free preflight or `--version <version> --build <number>` for explicit metadata. Rerun it on an existing release branch to resume an interrupted release; add `--retry-failed` to rerun failed jobs.
 
 Pressing **Publish release** in Release Studio or executing the legacy command without `--dry-run` is publication approval. Agents must still wait for an explicit user request. A failed or incomplete platform build must never create a tag or GitHub Release. The direct publisher creates its annotated final tag only after the candidate succeeds and local validation passes; do not manually create, replace, or push release tags.
 
-The expected public release contains exactly these twelve assets:
+The expected public release contains exactly these eighteen assets:
 
 ```text
 Resonance-macOS.zip
@@ -151,11 +152,17 @@ latest-mac.json
 Resonance-Setup-<version>.exe
 Resonance-Setup-<version>.exe.blockmap
 latest.yml
+Resonance-iPhone-Installer-Windows-<version>.exe
+Resonance-iPhone-Installer-Windows-<version>.exe.sha256
+Resonance-iPhone-Installer-macOS-<version>.zip
+Resonance-iPhone-Installer-macOS-<version>.zip.sha256
 Resonance-Android-<version>.apk
 Resonance-Android-<version>.apk.sha256
 latest-android.json
 Resonance-iOS-Simulator-<version>.zip
 Resonance-iOS-Simulator-<version>.zip.sha256
+Resonance-iOS-Device-<version>.ipa
+Resonance-iOS-Device-<version>.ipa.sha256
 ```
 
 Candidate workflow artifacts are retained for 14 days. Release Studio resumes a matching direct workflow run and may rerun only its failed jobs before publication. The legacy PR path may still use `publish-release.yml` with an exact tag, candidate SHA, and merge SHA. Never substitute a newer commit, a different run's artifacts, or a manually rebuilt binary. If publication fails after GitHub has created a tag or partial release, inspect the remote state and ask the user before deleting, retagging, clobbering, or replacing anything. If the release is already public, diagnose first rather than modifying its assets.
