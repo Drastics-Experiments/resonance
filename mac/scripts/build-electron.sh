@@ -101,6 +101,9 @@ export CSC_IDENTITY_AUTO_DISCOVERY="${CSC_IDENTITY_AUTO_DISCOVERY:-false}"
 if [[ "$MAC_UPDATE_AUTHENTICITY" == "development" ]]; then
     [[ -n "${CSC_LINK:-}" ]] || unset CSC_LINK
     [[ -n "${CSC_INSTALLER_LINK:-}" ]] || unset CSC_INSTALLER_LINK
+    # electron-builder otherwise skips all macOS signing on pull requests,
+    # including the requested ad-hoc identity=- signature.
+    export CSC_FOR_PULL_REQUEST=true
 fi
 
 ffmpeg_supports_arch() {
