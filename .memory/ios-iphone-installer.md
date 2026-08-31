@@ -23,6 +23,10 @@ installs it over Apple's device connection.
   authentication, anisette, and certificate state are memory-only.
 - The installer depends on Apple Mobile Device support on Windows and requires
   real Windows/iPhone validation. macOS compilation is not runtime proof.
+- The macOS Tauri bundle requires a real `.icns` entry in `bundle.icon`; a
+  1024-pixel PNG and Windows `.ico` alone fail with `No matching IconType`.
+  Keep the macOS companion build enabled on installer pull requests so this
+  packaging failure is caught before a direct release.
 - Every install must query GitHub's latest public release and require the exact
   versioned device IPA and SHA-256 sidecar from that release. There is no
   bundled IPA, persistent cache, file picker, or local fallback.

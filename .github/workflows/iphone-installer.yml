@@ -155,7 +155,6 @@ jobs:
 
   macos-installer:
     name: Build macOS installer
-    if: ${{ inputs.release_candidate }}
     runs-on: macos-26
 
     steps:
@@ -177,6 +176,7 @@ jobs:
         run: cargo test --locked
 
       - name: Verify candidate version
+        if: ${{ inputs.release_candidate }}
         shell: bash
         env:
           EXPECTED_VERSION: ${{ inputs.version }}
@@ -187,6 +187,7 @@ jobs:
           [[ "$EXPECTED_BUILD" =~ ^[1-9][0-9]*$ ]]
 
       - name: Apply candidate version to Tauri metadata
+        if: ${{ inputs.release_candidate }}
         shell: bash
         env:
           EXPECTED_VERSION: ${{ inputs.version }}
@@ -207,6 +208,7 @@ jobs:
           args: --bundles app -- --locked
 
       - name: Package versioned macOS release candidate
+        if: ${{ inputs.release_candidate }}
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
@@ -236,6 +238,7 @@ jobs:
           )
 
       - name: Upload macOS release candidate
+        if: ${{ inputs.release_candidate }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-assets-iphone-installer-macos

@@ -29,6 +29,7 @@
     "category": "Utility",
     "shortDescription": "Install Resonance on an iPhone from Windows.",
     "icon": [
+      "icons/resonance.icns",
       "../../../../ios/Resonance/Assets.xcassets/AppIcon.appiconset/AppIcon.png",
       "../../../../windows/resonance.ico"
     ],
