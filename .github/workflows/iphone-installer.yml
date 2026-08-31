@@ -126,7 +126,11 @@ jobs:
               throw "Windows installer version is $actual, expected $($env:EXPECTED_VERSION)."
             }
           '
-          sha256sum "$output" > "$output.sha256"
+          output_name="$(basename "$output")"
+          (
+            cd "$output_dir"
+            sha256sum "$output_name" > "$output_name.sha256"
+          )
 
       - name: Upload Windows release candidate
         if: ${{ inputs.release_candidate }}
@@ -225,7 +229,11 @@ jobs:
           actual_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
           [[ "$actual_version" == "$VERSION" ]]
           ditto -c -k --sequesterRsrc --keepParent "${apps[0]}" "$output"
-          shasum -a 256 "$output" > "$output.sha256"
+          output_name="$(basename "$output")"
+          (
+            cd "$output_dir"
+            shasum -a 256 "$output_name" > "$output_name.sha256"
+          )
 
       - name: Upload macOS release candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

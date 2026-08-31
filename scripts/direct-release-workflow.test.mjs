@@ -64,7 +64,9 @@ test("iPhone installer release candidates publish versioned Windows and macOS co
   assert.match(workflow, /Resonance-iPhone-Installer-macOS-\$\{\{ inputs\.version \}\}\.zip/);
   assert.match(workflow, /Resonance-iPhone-Installer-macOS-\$\{\{ inputs\.version \}\}\.zip\.sha256/);
   assert.match(workflow, /ditto -c -k --sequesterRsrc --keepParent/);
-  assert.match(workflow, /shasum -a 256/);
+  assert.equal((workflow.match(/output_name="\$\(basename "\$output"\)"/g) || []).length, 2);
+  assert.match(workflow, /cd "\$output_dir"[\s\S]+sha256sum "\$output_name" > "\$output_name\.sha256"/);
+  assert.match(workflow, /cd "\$output_dir"[\s\S]+shasum -a 256 "\$output_name" > "\$output_name\.sha256"/);
 });
 
 test("Windows packages embed the update authenticity policy selected by the build", () => {
