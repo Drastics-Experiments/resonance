@@ -53,6 +53,7 @@ test("pull request release candidates are secretless and explicitly unsigned", (
 
 test("iPhone installer release candidates publish versioned Windows and macOS companions", () => {
   const workflow = read(".github/workflows/iphone-installer.yml");
+  const config = JSON.parse(read("installers/windows/iphone-installer/src-tauri/tauri.conf.json"));
   assert.match(workflow, /workflow_call:/);
   assert.match(workflow, /release_candidate:/);
   assert.match(workflow, /source_ref:/);
@@ -60,6 +61,7 @@ test("iPhone installer release candidates publish versioned Windows and macOS co
   assert.match(workflow, /Resonance-iPhone-Installer-Windows-\$\{\{ inputs\.version \}\}\.exe/);
   assert.match(workflow, /Resonance-iPhone-Installer-Windows-\$\{\{ inputs\.version \}\}\.exe\.sha256/);
   assert.match(workflow, /Build macOS app/);
+  assert.doesNotMatch(workflow, /macos-installer:\n\s+name: Build macOS installer\n\s+if:/);
   assert.match(workflow, /args: --bundles app -- --locked/);
   assert.match(workflow, /Resonance-iPhone-Installer-macOS-\$\{\{ inputs\.version \}\}\.zip/);
   assert.match(workflow, /Resonance-iPhone-Installer-macOS-\$\{\{ inputs\.version \}\}\.zip\.sha256/);
@@ -67,6 +69,8 @@ test("iPhone installer release candidates publish versioned Windows and macOS co
   assert.equal((workflow.match(/output_name="\$\(basename "\$output"\)"/g) || []).length, 2);
   assert.match(workflow, /cd "\$output_dir"[\s\S]+sha256sum "\$output_name" > "\$output_name\.sha256"/);
   assert.match(workflow, /cd "\$output_dir"[\s\S]+shasum -a 256 "\$output_name" > "\$output_name\.sha256"/);
+  assert.ok(config.bundle.icon.includes("icons/resonance.icns"));
+  assert.ok(fs.statSync(path.join(root, "installers/windows/iphone-installer/src-tauri/icons/resonance.icns")).size > 0);
 });
 
 test("Windows packages embed the update authenticity policy selected by the build", () => {
