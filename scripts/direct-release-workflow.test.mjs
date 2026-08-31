@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
 
-test("direct release workflow is dispatch-only and calls all four platform builders", () => {
+test("direct release workflow is dispatch-only and calls all platform builders", () => {
   const workflow = read(".github/workflows/direct-release-build.yml");
   assert.match(workflow, /workflow_dispatch:/);
   assert.match(workflow, /production_release:/);
@@ -32,9 +32,11 @@ test("direct release workflow is dispatch-only and calls all four platform build
   assert.doesNotMatch(workflow, /^\s*pull_request:/m);
   assert.doesNotMatch(workflow, /gh pr|refs\/heads\/release\/|release\/v[0-9]/);
   assert.doesNotMatch(workflow, /gh release|contents:\s*write/);
-  for (const platform of ["android", "ios", "macos", "windows"]) {
+  for (const platform of ["android", "ios", "macos", "windows", "iphone-installer"]) {
     assert.match(workflow, new RegExp(`uses: \\.\\/\\.github\\/workflows\\/${platform}\\.yml`));
   }
+  assert.match(workflow, /iphone-installer:[\s\S]+release_candidate: true/);
+  assert.match(workflow, /bundle:[\s\S]+- iphone-installer/);
   assert.equal((workflow.match(/^\s+version_override: true$/gm) || []).length, 4);
   assert.match(workflow, /No version file is committed|mode: "direct"/);
 });
@@ -46,6 +48,25 @@ test("pull request release candidates are secretless and explicitly unsigned", (
   assert.match(workflow, /production_signing: false/);
   assert.match(workflow, /desktop_signing=unsigned/);
   assert.match(workflow, /--allow-unsigned-desktop-release/);
+  assert.match(workflow, /iphone-installer:[\s\S]+uses: \.\/\.github\/workflows\/iphone-installer\.yml/);
+});
+
+test("iPhone installer release candidates publish versioned Windows and macOS companions", () => {
+  const workflow = read(".github/workflows/iphone-installer.yml");
+  assert.match(workflow, /workflow_call:/);
+  assert.match(workflow, /release_candidate:/);
+  assert.match(workflow, /source_ref:/);
+  assert.match(workflow, /Build NSIS installer/);
+  assert.match(workflow, /Resonance-iPhone-Installer-Windows-\$\{\{ inputs\.version \}\}\.exe/);
+  assert.match(workflow, /Resonance-iPhone-Installer-Windows-\$\{\{ inputs\.version \}\}\.exe\.sha256/);
+  assert.match(workflow, /Build macOS app/);
+  assert.match(workflow, /args: --bundles app -- --locked/);
+  assert.match(workflow, /Resonance-iPhone-Installer-macOS-\$\{\{ inputs\.version \}\}\.zip/);
+  assert.match(workflow, /Resonance-iPhone-Installer-macOS-\$\{\{ inputs\.version \}\}\.zip\.sha256/);
+  assert.match(workflow, /ditto -c -k --sequesterRsrc --keepParent/);
+  assert.equal((workflow.match(/output_name="\$\(basename "\$output"\)"/g) || []).length, 2);
+  assert.match(workflow, /cd "\$output_dir"[\s\S]+sha256sum "\$output_name" > "\$output_name\.sha256"/);
+  assert.match(workflow, /cd "\$output_dir"[\s\S]+shasum -a 256 "\$output_name" > "\$output_name\.sha256"/);
 });
 
 test("Windows packages embed the update authenticity policy selected by the build", () => {
@@ -105,6 +126,7 @@ test("all third-party actions are pinned and checkout does not persist credentia
     ".github/workflows/android.yml",
     ".github/workflows/direct-release-build.yml",
     ".github/workflows/ios.yml",
+    ".github/workflows/iphone-installer.yml",
     ".github/workflows/macos.yml",
     ".github/workflows/publish-release.yml",
     ".github/workflows/release-candidate.yml",

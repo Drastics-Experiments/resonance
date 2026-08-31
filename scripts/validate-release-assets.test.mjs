@@ -22,6 +22,8 @@ function writeFixture(root) {
   const signing = path.join(root, "signing");
   fs.mkdirSync(assets, { recursive: true });
   const windowsInstaller = `Resonance-Setup-${version}.exe`;
+  const iphoneWindowsInstaller = `Resonance-iPhone-Installer-Windows-${version}.exe`;
+  const iphoneMacArchive = `Resonance-iPhone-Installer-macOS-${version}.zip`;
   const androidPackage = `Resonance-Android-${version}.apk`;
   const iosArchive = `Resonance-iOS-Simulator-${version}.zip`;
   const iosDevicePackage = `Resonance-iOS-Device-${version}.ipa`;
@@ -30,6 +32,8 @@ function writeFixture(root) {
     "Resonance-macOS.zip": "signed and notarized app archive",
     [windowsInstaller]: "signed Windows installer",
     [`${windowsInstaller}.blockmap`]: "block map",
+    [iphoneWindowsInstaller]: "unsigned iPhone Windows installer",
+    [iphoneMacArchive]: "unsigned iPhone macOS app archive",
     [androidPackage]: "signed Android package",
     [iosArchive]: "iOS Simulator archive",
     [iosDevicePackage]: "unsigned iOS device package",
@@ -37,7 +41,14 @@ function writeFixture(root) {
   for (const [name, value] of Object.entries(contents)) {
     fs.writeFileSync(path.join(assets, name), value);
   }
-  for (const name of ["Resonance-macOS.zip", androidPackage, iosArchive, iosDevicePackage]) {
+  for (const name of [
+    "Resonance-macOS.zip",
+    iphoneWindowsInstaller,
+    iphoneMacArchive,
+    androidPackage,
+    iosArchive,
+    iosDevicePackage,
+  ]) {
     fs.writeFileSync(path.join(assets, `${name}.sha256`), `${digest(path.join(assets, name), "sha256", "hex")}  ${name}\n`);
   }
   fs.writeFileSync(
@@ -79,7 +90,7 @@ function withFixture(callback) {
 
 test("production validation requires hash-bound desktop signing evidence", () => {
   withFixture(({ assets, signing }) => {
-    assert.equal(validateReleaseAssets(assets, version, { signingEvidenceDirectory: signing }).length, 14);
+    assert.equal(validateReleaseAssets(assets, version, { signingEvidenceDirectory: signing }).length, 18);
   });
 });
 
@@ -122,9 +133,23 @@ test("production validation rejects incomplete verification policy", () => {
   });
 });
 
+test("companion installer sidecars are bound to their packaged bytes", () => {
+  withFixture(({ assets }) => {
+    const sidecar = path.join(
+      assets,
+      `Resonance-iPhone-Installer-Windows-${version}.exe.sha256`,
+    );
+    fs.writeFileSync(sidecar, `${"0".repeat(64)}  Resonance-iPhone-Installer-Windows-${version}.exe\n`);
+    assert.throws(
+      () => validateReleaseAssets(assets, version, { requireDesktopSignatures: false }),
+      /Resonance-iPhone-Installer-Windows-1\.2\.3\.exe SHA-256 does not match its sidecar/,
+    );
+  });
+});
+
 test("unsigned desktop release fixtures require an explicit opt-out", () => {
   withFixture(({ assets }) => {
-    assert.equal(validateReleaseAssets(assets, version, { requireDesktopSignatures: false }).length, 14);
+    assert.equal(validateReleaseAssets(assets, version, { requireDesktopSignatures: false }).length, 18);
     const production = spawnSync(process.execPath, [validatorPath, assets, version], { encoding: "utf8" });
     assert.equal(production.status, 1);
     assert.match(production.stderr, /desktop signing evidence is required/);

@@ -122,6 +122,16 @@ jobs:
       build_number: ${{ needs.prepare.outputs.build }}
       source_ref: ${{ needs.prepare.outputs.source_sha }}
 
+  iphone-installer:
+    name: iPhone installer candidate
+    needs: prepare
+    uses: ./.github/workflows/iphone-installer.yml
+    with:
+      release_candidate: true
+      version: ${{ needs.prepare.outputs.version }}
+      build_number: ${{ needs.prepare.outputs.build }}
+      source_ref: ${{ needs.prepare.outputs.source_sha }}
+
   bundle:
     name: Bundle release candidate
     needs:
@@ -130,6 +140,7 @@ jobs:
       - ios
       - macos
       - windows
+      - iphone-installer
     runs-on: ubuntu-latest
 
     steps:

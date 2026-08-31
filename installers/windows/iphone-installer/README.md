@@ -45,9 +45,10 @@ the sidecar and GitHub asset digest, and deletes the download when the install
 attempt ends.
 
 The standard iOS release-candidate workflow builds both the Simulator archive
-and unsigned arm64 device IPA. The centralized release workflow validates and
-publishes both artifacts. The separate `iPhone Installer` workflow only tests
-and packages the Windows companion; it never embeds an app build.
+and unsigned arm64 device IPA. The centralized release workflows validate and
+publish both iOS artifacts together with versioned Windows and macOS companion
+installers, each with a SHA-256 sidecar. The reusable `iPhone Installer`
+workflow packages those companions; it never embeds an app build.
 
 For UI-only tests:
 

@@ -7,14 +7,38 @@ on:
     paths:
       - "ios/**"
       - "installers/windows/iphone-installer/**"
+      - "release/version.json"
       - "scripts/package-ios-device-ipa.sh"
       - ".github/workflows/iphone-installer.yml"
   pull_request:
     paths:
       - "ios/**"
       - "installers/windows/iphone-installer/**"
+      - "release/version.json"
       - "scripts/package-ios-device-ipa.sh"
       - ".github/workflows/iphone-installer.yml"
+  workflow_call:
+    inputs:
+      release_candidate:
+        description: Build versioned companion installers for a release candidate.
+        required: false
+        type: boolean
+        default: false
+      version:
+        description: Semantic app release version used in candidate asset names.
+        required: false
+        type: string
+        default: ""
+      build_number:
+        description: Monotonically increasing app build number for the candidate.
+        required: false
+        type: string
+        default: ""
+      source_ref:
+        description: Exact source ref to build.
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
 
 permissions:
@@ -23,12 +47,14 @@ permissions:
 jobs:
   windows-installer:
     name: Build Windows installer
+    if: ${{ inputs.release_candidate || github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release/') }}
     runs-on: windows-latest
 
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
 
       - name: Install Rust
@@ -42,16 +68,180 @@ jobs:
         working-directory: installers/windows/iphone-installer/src-tauri
         run: cargo test --locked
 
+      - name: Verify candidate version
+        if: ${{ inputs.release_candidate }}
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+          EXPECTED_BUILD: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$EXPECTED_BUILD" =~ ^[1-9][0-9]*$ ]]
+
+      - name: Apply candidate version to Tauri metadata
+        if: ${{ inputs.release_candidate }}
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          EXPECTED_VERSION="$EXPECTED_VERSION" node --input-type=module -e '
+            import fs from "node:fs";
+            const file = "installers/windows/iphone-installer/src-tauri/tauri.conf.json";
+            const config = JSON.parse(fs.readFileSync(file, "utf8"));
+            config.version = process.env.EXPECTED_VERSION;
+            fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
+          '
+
       - name: Build NSIS installer
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         with:
           projectPath: installers/windows/iphone-installer
           args: --bundles nsis -- --locked
 
+      - name: Package versioned Windows release candidate
+        if: ${{ inputs.release_candidate }}
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          output_dir="installers/windows/iphone-installer/dist"
+          mkdir -p "$output_dir"
+          installers=()
+          while IFS= read -r installer; do
+            installers+=("$installer")
+          done < <(find installers/windows/iphone-installer/src-tauri/target/release/bundle/nsis -maxdepth 1 -type f -name '*.exe' -print | sort)
+          if (( ${#installers[@]} != 1 )); then
+            printf 'expected exactly one NSIS executable, found %s\n' "${#installers[@]}" >&2
+            printf '%s\n' "${installers[@]}" >&2
+            exit 1
+          fi
+          output="$output_dir/Resonance-iPhone-Installer-Windows-${VERSION}.exe"
+          cp "${installers[0]}" "$output"
+          OUTPUT_PATH="$(cygpath -w "$output")" EXPECTED_VERSION="$VERSION" powershell -NoProfile -Command '
+            $actual = (Get-Item -LiteralPath $env:OUTPUT_PATH).VersionInfo.ProductVersion
+            if ($actual -notlike "$($env:EXPECTED_VERSION)*") {
+              throw "Windows installer version is $actual, expected $($env:EXPECTED_VERSION)."
+            }
+          '
+          output_name="$(basename "$output")"
+          (
+            cd "$output_dir"
+            sha256sum "$output_name" > "$output_name.sha256"
+          )
+
+      - name: Upload Windows release candidate
+        if: ${{ inputs.release_candidate }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets-iphone-installer-windows
+          path: |
+            installers/windows/iphone-installer/dist/Resonance-iPhone-Installer-Windows-${{ inputs.version }}.exe
+            installers/windows/iphone-installer/dist/Resonance-iPhone-Installer-Windows-${{ inputs.version }}.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+
       - name: Upload Windows installer
+        if: ${{ !inputs.release_candidate }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Resonance-iPhone-Installer-Windows-${{ github.sha }}
           path: installers/windows/iphone-installer/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
           retention-days: 14
+
+  macos-installer:
+    name: Build macOS installer
+    if: ${{ inputs.release_candidate }}
+    runs-on: macos-26
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+
+      - name: Test installer UI
+        working-directory: installers/windows/iphone-installer
+        run: node --test tests/*.test.mjs
+
+      - name: Test installer backend
+        working-directory: installers/windows/iphone-installer/src-tauri
+        run: cargo test --locked
+
+      - name: Verify candidate version
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+          EXPECTED_BUILD: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$EXPECTED_BUILD" =~ ^[1-9][0-9]*$ ]]
+
+      - name: Apply candidate version to Tauri metadata
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          EXPECTED_VERSION="$EXPECTED_VERSION" node --input-type=module -e '
+            import fs from "node:fs";
+            const file = "installers/windows/iphone-installer/src-tauri/tauri.conf.json";
+            const config = JSON.parse(fs.readFileSync(file, "utf8"));
+            config.version = process.env.EXPECTED_VERSION;
+            fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
+          '
+
+      - name: Build macOS app
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+        with:
+          projectPath: installers/windows/iphone-installer
+          args: --bundles app -- --locked
+
+      - name: Package versioned macOS release candidate
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          app_bundle_dir="installers/windows/iphone-installer/src-tauri/target/release/bundle/macos"
+          apps=()
+          while IFS= read -r app; do
+            apps+=("$app")
+          done < <(find "$app_bundle_dir" -maxdepth 1 -type d -name '*.app' -print | sort)
+          if (( ${#apps[@]} != 1 )); then
+            printf 'expected exactly one macOS app bundle, found %s\n' "${#apps[@]}" >&2
+            printf '%s\n' "${apps[@]}" >&2
+            exit 1
+          fi
+          output_dir="installers/windows/iphone-installer/dist"
+          mkdir -p "$output_dir"
+          output="$output_dir/Resonance-iPhone-Installer-macOS-${VERSION}.zip"
+          plist="${apps[0]}/Contents/Info.plist"
+          actual_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
+          [[ "$actual_version" == "$VERSION" ]]
+          ditto -c -k --sequesterRsrc --keepParent "${apps[0]}" "$output"
+          output_name="$(basename "$output")"
+          (
+            cd "$output_dir"
+            shasum -a 256 "$output_name" > "$output_name.sha256"
+          )
+
+      - name: Upload macOS release candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets-iphone-installer-macos
+          path: |
+            installers/windows/iphone-installer/dist/Resonance-iPhone-Installer-macOS-${{ inputs.version }}.zip
+            installers/windows/iphone-installer/dist/Resonance-iPhone-Installer-macOS-${{ inputs.version }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true

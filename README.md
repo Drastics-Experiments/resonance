@@ -87,7 +87,7 @@ From a clean branch containing the latest committed app updates, one command run
 /path/to/Resonance/app/scripts/release-now.mjs
 ```
 
-It automatically increments the patch version and build number, creates one `release/v<version>` PR from the current commit, waits for Android, iOS, macOS, and Windows to build in parallel, merges only after the complete candidate passes, publishes the already-built artifacts, and downloads the public release for final validation. Use explicit metadata when needed:
+It automatically increments the patch version and build number, creates one `release/v<version>` PR from the current commit, waits for Android, iOS, macOS, Windows, and the iPhone companion installers to build in parallel, merges only after the complete candidate passes, publishes the already-built artifacts, and downloads the public release for final validation. Use explicit metadata when needed:
 
 ```bash
 /path/to/Resonance/app/scripts/release-now.mjs --version 1.2.0 --build 20
@@ -95,7 +95,7 @@ It automatically increments the patch version and build number, creates one `rel
 
 Use `--dry-run` for a read-only preflight. If a network interruption or fixable Actions failure stops the command, rerun it from the existing release branch; add `--retry-failed` to rerun failed jobs. The command refuses a dirty tree and never stages arbitrary app changes.
 
-Release PRs remain the publication approval boundary. Trusted `main` builds warm the Gradle, Xcode, pnpm, and Electron packaging caches; release PRs restore those caches read-only. The candidate validator checks the complete asset set and provenance, while the publisher downloads the four validated platform artifacts directly instead of rebuilding or re-uploading a combined binary bundle. Do not manually push the version tag. Installed builds continue to use the GitHub Release update feeds.
+Release PRs remain the publication approval boundary. Trusted `main` builds warm the Gradle, Xcode, pnpm, and Electron packaging caches; release PRs restore those caches read-only. The candidate validator checks the complete eighteen-file asset set and provenance, while the publisher downloads the validated platform and iPhone companion artifacts directly instead of rebuilding or re-uploading a combined binary bundle. Do not manually push the version tag. Installed builds continue to use the GitHub Release update feeds.
 
 ## macOS development
 
@@ -113,7 +113,7 @@ MAC_ARCH=universal APP_VERSION=1.0.1 BUILD_NUMBER=1 \
   bash mac/scripts/build-electron.sh
 ```
 
-The packaged app checks `latest-mac.json` on GitHub Releases, verifies the downloaded app archive with SHA-256, validates its bundle identity and code signature, replaces the installed app atomically, and relaunches it. The centralized publish workflow releases both Windows and macOS update assets together with Android and iOS Simulator artifacts.
+The packaged app checks `latest-mac.json` on GitHub Releases, verifies the downloaded app archive with SHA-256, validates its bundle identity and code signature, replaces the installed app atomically, and relaunches it. The centralized publish workflow releases both Windows and macOS update assets together with Android, iOS Simulator/device, and iPhone companion installer artifacts.
 
 ## Android development
 

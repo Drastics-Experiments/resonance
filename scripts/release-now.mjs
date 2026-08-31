@@ -7,6 +7,8 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { expectedAssetNames as validatedExpectedAssetNames } from "./validate-release-assets.mjs";
+
 const scriptPath = fileURLToPath(import.meta.url);
 const repositoryRoot = path.resolve(path.dirname(scriptPath), "..");
 const versionPattern = /^[0-9]+\.[0-9]+\.[0-9]+$/;
@@ -177,22 +179,7 @@ export function compareVersions(left, right) {
 }
 
 export function expectedAssetNames(version) {
-  return [
-    "Resonance-Installer.pkg",
-    "Resonance-macOS.zip",
-    "Resonance-macOS.zip.sha256",
-    "latest-mac.json",
-    `Resonance-Setup-${version}.exe`,
-    `Resonance-Setup-${version}.exe.blockmap`,
-    "latest.yml",
-    `Resonance-Android-${version}.apk`,
-    `Resonance-Android-${version}.apk.sha256`,
-    "latest-android.json",
-    `Resonance-iOS-Simulator-${version}.zip`,
-    `Resonance-iOS-Simulator-${version}.zip.sha256`,
-    `Resonance-iOS-Device-${version}.ipa`,
-    `Resonance-iOS-Device-${version}.ipa.sha256`,
-  ].sort();
+  return validatedExpectedAssetNames(version);
 }
 
 export function selectLatestRun(runs, headSha) {
@@ -360,7 +347,8 @@ function validateVersionChanges() {
 
 function releaseBody(version, build, sourceSha) {
   return `## Release\n- version: ${version}\n- build: ${build}\n- source: ${sourceSha}\n\n` +
-    "The production direct-release workflow builds all four platforms from the exact " +
+    "The production direct-release workflow builds all four client platforms plus " +
+    "the iPhone companion installers from the exact " +
     "protected main SHA in parallel; macOS and Windows are production-signed and verified. " +
     "It validates the complete asset and release-policy " +
     "contract and records exact source provenance. Publication is performed only by " +
