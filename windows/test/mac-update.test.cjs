@@ -7,11 +7,13 @@ const test = require("node:test");
 const {
   allowsMacUpdateURL,
   compareMacVersions,
+  discoverMacUpdateManifest,
   downloadMacUpdate,
   fetchMacUpdateManifest,
   isMacUpdateAvailable,
   launchMacUpdateInstaller,
   normalizeMacUpdateManifest,
+  parseMacReleaseTag,
   updateArchiveFilename,
   validateMacUpdateArchive,
 } = require("../mac-update.cjs");
@@ -60,6 +62,38 @@ test("fetches a bounded manifest and rejects foreign redirects", async () => {
       headers: { location: "https://evil.example/latest-mac.json" },
     }),
   }), /untrusted redirect/i);
+});
+
+test("discovers the newest timestamped macOS prerelease despite duplicate titles", async () => {
+  const tags = ["v1.2.4-pre.1788150123", "v1.2.4-pre.1788154123"];
+  const releases = tags.map((tag) => ({
+    name: "Repeated beta title",
+    tag_name: tag,
+    draft: false,
+    prerelease: true,
+    assets: [{
+      name: "latest-mac.json",
+      browser_download_url: `https://github.com/Drastics-Experiments/resonance/releases/download/${tag}/latest-mac.json`,
+    }],
+  }));
+  const fetchImpl = async (url) => {
+    const href = String(url);
+    if (href.includes("api.github.com")) return response(JSON.stringify(releases));
+    const tag = href.match(/\/download\/(v[^/]+)\/latest-mac\.json$/)?.[1];
+    const parsed = parseMacReleaseTag(tag);
+    return response(JSON.stringify({
+      version: parsed.version,
+      build: tag.endsWith("4123") ? "20" : "19",
+      releaseTag: tag,
+      url: `https://github.com/Drastics-Experiments/resonance/releases/download/${tag}/Resonance-macOS.zip`,
+      sha256: SHA256,
+    }));
+  };
+
+  const manifest = await discoverMacUpdateManifest({ fetchImpl });
+  assert.equal(manifest.releaseTag, tags[1]);
+  assert.equal(manifest.build, "20");
+  assert.equal(updateArchiveFilename(manifest.version, manifest.releaseTag), "Resonance-macOS-1.2.4-1788154123.zip");
 });
 
 test("downloads, verifies, and validates the macOS archive", async (t) => {

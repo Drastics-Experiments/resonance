@@ -94,8 +94,10 @@ const {
   conciseUpdaterError,
   fetchWindowsUpdateVersion,
   installDownloadedWindowsUpdate,
+  parseWindowsReleaseTag,
   resolveMacUpdateManifest,
   resolveWindowsUpdateFeed,
+  selectNewestWindowsRelease,
 } = updaterFeed;
 const { isManagedLibraryFile } = libraryPaths;
 const {
@@ -2344,10 +2346,8 @@ test("scales listening-history axes from the visible peak", () => {
   assert.equal(niceChartMaximum(325), 400);
 });
 
-test("selects the newest stable release that actually has a Windows update feed", async () => {
-  const fetchImpl = async () => ({
-    ok: true,
-    json: async () => [
+test("selects the newest stable or timestamped prerelease Windows update feed", async () => {
+  const releases = [
       {
         tag_name: "android-v1.0.4",
         draft: false,
@@ -2360,30 +2360,59 @@ test("selects the newest stable release that actually has a Windows update feed"
         prerelease: false,
         assets: [{ name: "latest.yml", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.0.3/latest.yml" }],
       },
-    ],
-  });
+      {
+        name: "Repeated beta title",
+        tag_name: "v1.0.4-pre.1788150123",
+        draft: false,
+        prerelease: true,
+        assets: [{ name: "latest.yml", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.0.4-pre.1788150123/latest.yml" }],
+      },
+      {
+        name: "Repeated beta title",
+        tag_name: "v1.0.4-pre.1788154123",
+        draft: false,
+        prerelease: true,
+        assets: [{ name: "latest.yml", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.0.4-pre.1788154123/latest.yml" }],
+      },
+    ];
+  const fetchImpl = async (url) => {
+    const href = String(url);
+    if (href.includes("api.github.com")) {
+      return { ok: true, status: 200, headers: { get: () => null }, json: async () => releases };
+    }
+    const tag = href.match(/\/download\/(v[^/]+)\/latest\.yml$/)?.[1];
+    const parsed = parseWindowsReleaseTag(tag);
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      text: async () => `version: ${parsed.effectiveVersion}\nresonanceBuild: ${tag.includes("4123") ? 22 : 21}\n`,
+    };
+  };
 
-  assert.deepEqual(await resolveWindowsUpdateFeed(fetchImpl), {
-    tag: "v1.0.3",
-    feedURL: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.0.3/",
-  });
+  const selected = await resolveWindowsUpdateFeed(fetchImpl, { prerelease: true });
+  assert.equal(selected.tag, "v1.0.4-pre.1788154123");
+  assert.equal(selected.version, "1.0.4-pre.1788154123");
+  assert.equal(selected.build, 22);
+  assert.equal(selected.feedURL, "https://github.com/Drastics-Experiments/resonance/releases/download/v1.0.4-pre.1788154123/");
+  assert.equal(selectNewestWindowsRelease([selected, { tag: "v1.0.4-pre.1788150123", build: 21 }]), selected);
 });
 
 test("developer update feeds select prereleases with the required platform manifest", async () => {
   const releases = [
     {
-      tag_name: "v1.3.0-beta.1",
+      tag_name: "v1.3.0-pre.1788159123",
       draft: true,
       prerelease: true,
       assets: [
-        { name: "latest.yml", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.3.0-beta.1/latest.yml" },
+        { name: "latest.yml", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.3.0-pre.1788159123/latest.yml" },
       ],
     },
     {
-      tag_name: "v1.2.1-beta.1",
+      tag_name: "v1.2.1-pre.1788158123",
       draft: false,
       prerelease: true,
-      assets: [{ name: "notes.txt", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.1-beta.1/notes.txt" }],
+      assets: [{ name: "notes.txt", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.1-pre.1788158123/notes.txt" }],
     },
     {
       tag_name: "v1.1.0",
@@ -2395,33 +2424,45 @@ test("developer update feeds select prereleases with the required platform manif
       ],
     },
     {
-      tag_name: "v1.2.0-beta.1",
+      tag_name: "v1.2.0-pre.1788154123",
       draft: false,
       prerelease: true,
       assets: [
-        { name: "latest.yml", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.0-beta.1/latest.yml" },
-        { name: "latest-mac.json", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.0-beta.1/latest-mac.json" },
+        { name: "latest.yml", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.0-pre.1788154123/latest.yml" },
+        { name: "latest-mac.json", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.0-pre.1788154123/latest-mac.json" },
       ],
     },
   ];
-  const fetchImpl = async () => ({ ok: true, json: async () => releases });
+  const fetchImpl = async (url) => String(url).endsWith("latest.yml")
+    ? { ok: true, text: async () => `version: ${String(url).includes("pre.1788154123") ? "1.2.0-pre.1788154123" : "1.1.0"}\nresonanceBuild: 21\n` }
+    : { ok: true, json: async () => releases };
   assert.deepEqual(await resolveWindowsUpdateFeed(fetchImpl, { prerelease: true }), {
-    tag: "v1.2.0-beta.1",
-    feedURL: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.0-beta.1/",
+    tag: "v1.2.0-pre.1788154123",
+    feedURL: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.0-pre.1788154123/",
+    version: "1.2.0-pre.1788154123",
+    baseVersion: "1.2.0",
+    build: 21,
+    prerelease: true,
+    sourceTimestamp: 1788154123,
   });
   assert.deepEqual(await resolveMacUpdateManifest(fetchImpl, { prerelease: true }), {
-    tag: "v1.2.0-beta.1",
-    manifestURL: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.0-beta.1/latest-mac.json",
+    tag: "v1.2.0-pre.1788154123",
+    manifestURL: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.0-pre.1788154123/latest-mac.json",
   });
   assert.deepEqual(await resolveWindowsUpdateFeed(fetchImpl), {
     tag: "v1.1.0",
     feedURL: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.1.0/",
+    version: "1.1.0",
+    baseVersion: "1.1.0",
+    build: 21,
+    prerelease: false,
+    sourceTimestamp: null,
   });
 
   const unsafeFetch = async () => ({
     ok: true,
     json: async () => [{
-      tag_name: "v9.0.0-beta.1",
+      tag_name: "v9.0.0-pre.1788159123",
       draft: false,
       prerelease: true,
       assets: [{ name: "latest.yml", browser_download_url: "https://evil.example/latest.yml" }],
@@ -2429,7 +2470,7 @@ test("developer update feeds select prereleases with the required platform manif
   });
   await assert.rejects(
     resolveWindowsUpdateFeed(unsafeFetch, { prerelease: true }),
-    /unsafe desktop update URL/,
+    /No published prerelease contains latest\.yml/,
   );
 });
 
@@ -2454,6 +2495,8 @@ test("developer source builds can scan a bounded Windows manifest without instal
 test("rejects release lists without a Windows manifest and shortens updater errors", async () => {
   const fetchImpl = async () => ({
     ok: true,
+    status: 200,
+    headers: { get: () => null },
     json: async () => [{ tag_name: "android-v1.0.4", assets: [] }],
   });
   await assert.rejects(resolveWindowsUpdateFeed(fetchImpl), /No published stable release contains latest\.yml/);
@@ -2474,6 +2517,8 @@ test("installs downloaded Windows updates silently in place", () => {
   }), true);
   assert.deepEqual(installArguments, [true, true]);
   assert.match(mainSource, /autoUpdater\.autoDownload = true/);
+  assert.match(mainSource, /autoUpdater\.allowPrerelease = true/);
+  assert.match(mainSource, /allowDowngrade = developerMode[\s\S]+candidate\.prerelease[\s\S]+app\.getVersion\(\) === candidate\.baseVersion/);
   assert.match(mainSource, /autoUpdater\.autoInstallOnAppQuit = false/);
   assert.match(mainSource, /verifyDownloadedWindowsUpdate\(\{[\s\S]+downloadedFile: information\?\.downloadedFile[\s\S]+authenticityMode: desktopPackage\.resonanceUpdateAuthenticity/);
   assert.match(mainSource, /verifiedWindowsUpdate\.generation !== desktopUpdateChannel\.capture\(\)[\s\S]+windowsUpdateVerificationPromise/);
@@ -2487,7 +2532,6 @@ test("installs downloaded Windows updates silently in place", () => {
   assert.match(appSource, /Check GitHub prereleases instead of stable releases[\s\S]+id="settingsDeveloperMode"/);
   assert.match(mainSource, /resolveWindowsUpdateFeed\(fetch, \{[\s\S]+prerelease: developerMode/);
   assert.match(mainSource, /const developerMode = runtimeAppPreferences\.developerMode[\s\S]+autoUpdater\.allowPrerelease = developerMode/);
-  assert.match(mainSource, /autoUpdater\.allowDowngrade = false/);
   assert.match(mainSource, /resolveMacUpdateManifest\(fetch, \{ prerelease: true \}\)/);
   assert.match(mainSource, /app\.isPackaged \|\| runtimeAppPreferences\.developerMode/);
   assert.match(mainSource, /scanOnly: true/);

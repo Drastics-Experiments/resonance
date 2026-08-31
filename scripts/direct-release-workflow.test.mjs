@@ -15,17 +15,24 @@ test("direct release workflow is dispatch-only and calls all platform builders",
   assert.match(workflow, /production_release:/);
   assert.match(workflow, /unsigned_desktop:/);
   assert.match(workflow, /replace_prerelease:/);
+  assert.match(workflow, /release_tag:/);
+  assert.match(workflow, /prerelease:/);
   assert.match(workflow, /environment: production-release/);
   assert.match(workflow, /github\.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /\[\[ "\$\(git rev-parse origin\/main\)" == "\$SOURCE_SHA" \]\]/);
-  assert.match(workflow, /\[\[ "\$UNSIGNED_DESKTOP" == "false" \]\][\s\S]+require production-signed macOS and Windows artifacts/);
-  assert.equal((workflow.match(/production_signing: true/g) || []).length, 3);
-  assert.doesNotMatch(workflow, /--allow-unsigned-desktop-release/);
+  assert.match(workflow, /if \[\[ "\$PRERELEASE" == "false" && "\$UNSIGNED_DESKTOP" != "false" \]\]; then[\s\S]+require production-signed macOS and Windows artifacts/);
+  assert.equal((workflow.match(/production_signing: true/g) || []).length, 1);
+  assert.equal((workflow.match(/production_signing: \$\{\{ needs\.prepare\.outputs\.unsigned_desktop != 'true' \}\}/g) || []).length, 2);
+  assert.match(workflow, /--allow-unsigned-desktop-release/);
   assert.match(
     workflow,
     /REPLACE_PRERELEASE[\s\S]+git show-ref --verify --quiet "refs\/tags\/\$\{TAG\}"[\s\S]+releases\/tags\/\$\{TAG\}[\s\S]+\.prerelease[\s\S]+== "true"/,
   );
-  assert.match(workflow, /replacePrerelease: process\.env\.REPLACE_PRERELEASE === "true"/);
+  assert.match(workflow, /prerelease: process\.env\.PRERELEASE === "true"/);
+  assert.match(workflow, /WINDOWS_VERSION="\$\{VERSION\}-pre\.\$\{BASH_REMATCH\[1\]\}"/);
+  assert.match(workflow, /group: direct-release-\$\{\{ inputs\.release_tag \}\}/);
+  assert.equal((workflow.match(/^\s+release_tag: \$\{\{ needs\.prepare\.outputs\.tag \}\}$/gm) || []).length, 3);
+  assert.match(workflow, /package_version: \$\{\{ needs\.prepare\.outputs\.windows_version \}\}/);
   assert.doesNotMatch(workflow, /^\s*pull_request:/m);
   assert.doesNotMatch(workflow, /gh pr|refs\/heads\/release\/|release\/v[0-9]/);
   assert.doesNotMatch(workflow, /gh release|contents:\s*write/);

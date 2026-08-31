@@ -46,6 +46,15 @@ on:
         required: false
         type: string
         default: ""
+      release_tag:
+        required: false
+        type: string
+        default: ""
+      package_version:
+        description: Electron updater version; timestamped prereleases use X.Y.Z-pre.UNIX.
+        required: false
+        type: string
+        default: ""
       version_override:
         description: Apply version and build inputs inside the runner without changing repository source.
         required: false
@@ -104,6 +113,29 @@ jobs:
           read -r VERSION BUILD < <(node -e 'const value = require("./release/version.json"); console.log(value.version, value.build)')
           [[ "$VERSION" == "$EXPECTED_VERSION" ]]
           [[ "$BUILD" == "$EXPECTED_BUILD" ]]
+
+      - name: Apply Windows updater version
+        if: ${{ inputs.release_candidate }}
+        shell: bash
+        working-directory: .
+        env:
+          BASE_VERSION: ${{ inputs.version }}
+          PACKAGE_VERSION: ${{ inputs.package_version }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          RELEASE_TAG="${RELEASE_TAG:-v${BASE_VERSION}}"
+          PACKAGE_VERSION="${PACKAGE_VERSION:-$BASE_VERSION}"
+          export RELEASE_TAG PACKAGE_VERSION
+          [[ "$RELEASE_TAG" == "v${BASE_VERSION}" || "$RELEASE_TAG" =~ ^v${BASE_VERSION}-pre\.[1-9][0-9]{9,11}$ ]]
+          [[ "$PACKAGE_VERSION" == "$BASE_VERSION" || "$PACKAGE_VERSION" =~ ^${BASE_VERSION}-pre\.[1-9][0-9]{9,11}$ ]]
+          node --input-type=module -e '
+            import fs from "node:fs";
+            const file = "windows/package.json";
+            const value = JSON.parse(fs.readFileSync(file, "utf8"));
+            value.version = process.env.PACKAGE_VERSION;
+            value.build.nsis.artifactName = `Resonance-Setup-${process.env.BASE_VERSION}.\${ext}`;
+            fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+          '
 
       - name: Validate Authenticode signing secrets
         if: ${{ inputs.release_candidate && inputs.production_signing }}
@@ -282,9 +314,16 @@ jobs:
         working-directory: .
         env:
           VERSION: ${{ inputs.version }}
+          PACKAGE_VERSION: ${{ inputs.package_version }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
         run: |
-          grep -Eq "^version: ['\"]?${VERSION}['\"]?$" installers/windows/dist/latest.yml
+          PACKAGE_VERSION="${PACKAGE_VERSION:-$VERSION}"
+          if ! grep -Eq '^resonanceBuild:' installers/windows/dist/latest.yml; then
+            printf '\nresonanceBuild: %s\n' "$BUILD_NUMBER" >> installers/windows/dist/latest.yml
+          fi
+          grep -Eq "^version: ['\"]?${PACKAGE_VERSION}['\"]?$" installers/windows/dist/latest.yml
           grep -Eq "^path: ['\"]?Resonance-Setup-${VERSION}\\.exe['\"]?$" installers/windows/dist/latest.yml
+          grep -Eq "^resonanceBuild: ['\"]?${BUILD_NUMBER}['\"]?$" installers/windows/dist/latest.yml
 
       - name: Upload installer artifact
         if: ${{ !inputs.release_candidate }}

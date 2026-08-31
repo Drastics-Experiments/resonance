@@ -62,6 +62,48 @@ class AndroidUpdatePolicyTest {
     }
 
     @Test
+    fun timestampedPrereleasesUseTheExactTagAndHighestBuild() {
+        val olderTag = "v1.0.7-pre.1788150123"
+        val newerTag = "v1.0.7-pre.1788154123"
+        val older = requireNotNull(AndroidUpdatePolicy.availableUpdate(
+            rawManifest = manifest(
+                versionCode = 7,
+                releaseTag = olderTag,
+                apkUrl = "https://github.com/Drastics-Experiments/resonance/releases/download/$olderTag/Resonance-Android-1.0.7.apk",
+            ),
+            currentVersionCode = 6,
+            expectedReleaseTag = olderTag,
+        ))
+        val newer = requireNotNull(AndroidUpdatePolicy.availableUpdate(
+            rawManifest = manifest(
+                versionCode = 8,
+                releaseTag = newerTag,
+                apkUrl = "https://github.com/Drastics-Experiments/resonance/releases/download/$newerTag/Resonance-Android-1.0.7.apk",
+            ),
+            currentVersionCode = 6,
+            expectedReleaseTag = newerTag,
+        ))
+
+        assertEquals(newerTag, AndroidUpdatePolicy.newestUpdate(listOf(newer, older))?.releaseTag)
+        assertThrows(IllegalArgumentException::class.java) {
+            AndroidUpdatePolicy.availableUpdate(
+                rawManifest = manifest(versionCode = 8, releaseTag = olderTag),
+                currentVersionCode = 6,
+                expectedReleaseTag = newerTag,
+            )
+        }
+    }
+
+    @Test
+    fun releaseListParserAcceptsDuplicateTitlesWithUniqueTimestampTags() {
+        val releases = AndroidUpdatePolicy.decodeReleaseList(
+            """[{"name":"Beta","tag_name":"v1.0.7-pre.1788150123","prerelease":true,"assets":[]},{"name":"Beta","tag_name":"v1.0.7-pre.1788154123","prerelease":true,"assets":[]}]""",
+        )
+        assertEquals(2, releases.size)
+        assertEquals(1788154123L, AndroidUpdatePolicy.parseReleaseTag(releases[1].tagName)?.sourceTimestamp)
+    }
+
+    @Test
     fun installedOrOlderManifestDoesNotOfferUpdate() {
         assertNull(AndroidUpdatePolicy.availableUpdate(manifest(versionCode = 6), 6))
         assertNull(AndroidUpdatePolicy.availableUpdate(manifest(versionCode = 5), 6))
@@ -114,19 +156,21 @@ class AndroidUpdatePolicyTest {
               {
                 "draft": false,
                 "prerelease": true,
+                "tag_name": "v2.1.0-pre.1788154123",
                 "published_at": "2026-08-31T12:00:00Z",
                 "assets": [{
                   "name": "latest-android.json",
-                  "browser_download_url": "https://github.com/Drastics-Experiments/resonance/releases/download/v2.1.0-beta/latest-android.json"
+                  "browser_download_url": "https://github.com/Drastics-Experiments/resonance/releases/download/v2.1.0-pre.1788154123/latest-android.json"
                 }]
               },
               {
                 "draft": false,
                 "prerelease": true,
+                "tag_name": "v2.0.0-pre.1788150123",
                 "published_at": "2026-08-30T12:00:00Z",
                 "assets": [{
                   "name": "latest-android.json",
-                  "browser_download_url": "https://github.com/Drastics-Experiments/resonance/releases/download/v2.0.0-beta/latest-android.json"
+                  "browser_download_url": "https://github.com/Drastics-Experiments/resonance/releases/download/v2.0.0-pre.1788150123/latest-android.json"
                 }]
               }
             ]
@@ -134,7 +178,7 @@ class AndroidUpdatePolicyTest {
         )
 
         assertEquals(
-            "https://github.com/Drastics-Experiments/resonance/releases/download/v2.1.0-beta/latest-android.json",
+            "https://github.com/Drastics-Experiments/resonance/releases/download/v2.1.0-pre.1788154123/latest-android.json",
             manifestURL,
         )
     }
@@ -147,15 +191,17 @@ class AndroidUpdatePolicyTest {
               {
                 "draft": true,
                 "prerelease": true,
+                "tag_name": "v3.0.0-pre.1788159123",
                 "published_at": "2026-09-02T12:00:00Z",
                 "assets": [{
                   "name": "latest-android.json",
-                  "browser_download_url": "https://github.com/Drastics-Experiments/resonance/releases/download/v3.0.0-beta/latest-android.json"
+                  "browser_download_url": "https://github.com/Drastics-Experiments/resonance/releases/download/v3.0.0-pre.1788159123/latest-android.json"
                 }]
               },
               {
                 "draft": false,
                 "prerelease": false,
+                "tag_name": "v3.0.0",
                 "published_at": "2026-09-01T12:00:00Z",
                 "assets": [{
                   "name": "latest-android.json",
@@ -165,16 +211,18 @@ class AndroidUpdatePolicyTest {
               {
                 "draft": false,
                 "prerelease": true,
+                "tag_name": "v2.1.0-pre.1788154123",
                 "published_at": "2026-08-31T12:00:00Z",
                 "assets": [{"name": "Resonance-Android.apk"}]
               },
               {
                 "draft": false,
                 "prerelease": true,
+                "tag_name": "v2.0.0-pre.1788150123",
                 "published_at": "2026-08-30T12:00:00Z",
                 "assets": [{
                   "name": "latest-android.json",
-                  "browser_download_url": "https://github.com/Drastics-Experiments/resonance/releases/download/v2.0.0-beta/latest-android.json"
+                  "browser_download_url": "https://github.com/Drastics-Experiments/resonance/releases/download/v2.0.0-pre.1788150123/latest-android.json"
                 }]
               }
             ]
@@ -182,7 +230,7 @@ class AndroidUpdatePolicyTest {
         )
 
         assertEquals(
-            "https://github.com/Drastics-Experiments/resonance/releases/download/v2.0.0-beta/latest-android.json",
+            "https://github.com/Drastics-Experiments/resonance/releases/download/v2.0.0-pre.1788150123/latest-android.json",
             manifestURL,
         )
     }
@@ -195,6 +243,7 @@ class AndroidUpdatePolicyTest {
                 [{
                   "draft": false,
                   "prerelease": true,
+                  "tag_name": "v2.1.0-pre.1788154123",
                   "published_at": "2026-08-31T12:00:00Z",
                   "assets": [{
                     "name": "latest-android.json",
@@ -205,7 +254,7 @@ class AndroidUpdatePolicyTest {
             )
         }
 
-        assertEquals("The prerelease update manifest URL is not secure.", error.message)
+        assertEquals("No published Android prerelease contains latest-android.json.", error.message)
     }
 
     @Test
@@ -278,11 +327,13 @@ class AndroidUpdatePolicyTest {
         versionCode: Long,
         apkUrl: String = "https://github.com/Drastics-Experiments/resonance/releases/download/v1.0.7/Resonance-Android-1.0.7.apk",
         sha256: String = SHA256,
+        releaseTag: String? = null,
     ): String = """
         {
           "schemaVersion": 1,
           "versionCode": $versionCode,
           "versionName": "1.0.7",
+          ${releaseTag?.let { "\"releaseTag\": \"$it\"," }.orEmpty()}
           "apkUrl": "$apkUrl",
           "sha256": "$sha256",
           "sizeBytes": 1234,

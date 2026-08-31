@@ -94,7 +94,6 @@ const {
   resolveWindowsUpdateFeed,
 } = require("./updater-feed.cjs");
 const {
-  MAC_UPDATE_MANIFEST_URL,
   downloadMacUpdate,
   compareMacVersions,
   fetchMacUpdateManifest,
@@ -881,6 +880,10 @@ function finishServerTransfer(event, controller) {
 // EPIPE after that parent process exits. Status is surfaced through IPC instead.
 autoUpdater.logger = null;
 autoUpdater.autoDownload = true;
+// Release Studio prereleases use a semver prerelease suffix carrying their
+// Unix source timestamp. Opt in so an installed stable build can discover the
+// next-version prerelease and later promote cleanly to the final stable build.
+autoUpdater.allowPrerelease = true;
 // Never let electron-updater install a downloaded NSIS package before the
 // Authenticode publisher check below has completed and the user has opted in.
 autoUpdater.autoInstallOnAppQuit = false;
@@ -972,9 +975,10 @@ async function checkForWindowsUpdates() {
   }
   const operationPromise = (async () => {
     const developerMode = runtimeAppPreferences.developerMode;
-    const { feedURL } = await resolveWindowsUpdateFeed(fetch, {
+    const candidate = await resolveWindowsUpdateFeed(fetch, {
       prerelease: developerMode,
     });
+    const { feedURL } = candidate;
     if (!desktopUpdateChannel.isCurrent(generation)) return null;
     if (!app.isPackaged) {
       const candidateVersion = await fetchWindowsUpdateVersion(new URL("latest.yml", feedURL), fetch);
@@ -987,7 +991,12 @@ async function checkForWindowsUpdates() {
     }
     activeWindowsUpdateGeneration = generation;
     autoUpdater.allowPrerelease = developerMode;
-    autoUpdater.allowDowngrade = false;
+    // A legacy prerelease may already have packaged the bare base version.
+    // Permit only that exact same-base transition; never enable general
+    // downgrades across release versions.
+    autoUpdater.allowDowngrade = developerMode
+      && candidate.prerelease
+      && app.getVersion() === candidate.baseVersion;
     autoUpdater.setFeedURL({ provider: "generic", url: feedURL });
     const result = await autoUpdater.checkForUpdates();
     const cancellation = result?.cancellationToken
@@ -1063,7 +1072,7 @@ function bundledMacUpdateHelperPath() {
 }
 
 async function cachedMacUpdateArchive(manifest) {
-  const archivePath = path.join(macUpdateDirectory(), updateArchiveFilename(manifest.version));
+  const archivePath = path.join(macUpdateDirectory(), updateArchiveFilename(manifest.version, manifest.releaseTag));
   return await validateMacUpdateArchive(archivePath, manifest) ? archivePath : null;
 }
 
