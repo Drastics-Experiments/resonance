@@ -86,10 +86,17 @@ const {
   publicListenAlongEvent,
 } = require("./listen-along.cjs");
 const { catalogSHA256, normalizeServerBaseURL } = require("./server-policy.cjs");
-const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = require("./updater-feed.cjs");
+const {
+  conciseUpdaterError,
+  fetchWindowsUpdateVersion,
+  installDownloadedWindowsUpdate,
+  resolveMacUpdateManifest,
+  resolveWindowsUpdateFeed,
+} = require("./updater-feed.cjs");
 const {
   MAC_UPDATE_MANIFEST_URL,
   downloadMacUpdate,
+  compareMacVersions,
   fetchMacUpdateManifest,
   isMacUpdateAvailable,
   launchMacUpdateInstaller,
@@ -238,7 +245,13 @@ let applicationQuitRequested = false;
 let backgroundTray = null;
 const DEFAULT_APP_THEME = "midnight";
 const APP_THEME_IDS = new Set([DEFAULT_APP_THEME, "ocean", "forest", "sunset"]);
-let runtimeAppPreferences = { theme: DEFAULT_APP_THEME, runInBackground: false, discordRichPresence: false };
+let runtimeAppPreferences = {
+  theme: DEFAULT_APP_THEME,
+  runInBackground: false,
+  discordRichPresence: false,
+  developerMode: false,
+};
+let runtimeAppPreferencesLoaded = false;
 let currentDiscordPresenceStatus = { state: "disabled", message: "Rich Presence is off.", applicationConfigured: false };
 const activeServerTransfers = new Map();
 let serverTransferGeneration = 0;
@@ -865,13 +878,15 @@ autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = false;
 
 function desktopUpdatesSupported() {
-  return app.isPackaged && (process.platform === "win32" || process.platform === "darwin");
+  return (app.isPackaged || runtimeAppPreferences.developerMode)
+    && (process.platform === "win32" || process.platform === "darwin");
 }
 
 function publishUpdateStatus(type, details = {}) {
   const previousVersion = currentWindowsUpdateStatus.version;
   currentWindowsUpdateStatus = {
     type,
+    channel: runtimeAppPreferences.developerMode ? "prerelease" : "stable",
     ...(type !== "current" && (details.version || previousVersion) ? { version: details.version || previousVersion } : {}),
     ...details,
   };
@@ -917,10 +932,22 @@ autoUpdater.on("error", (error) => {
 });
 
 async function checkForWindowsUpdates() {
-  if (process.platform !== "win32" || !app.isPackaged) return null;
+  if (process.platform !== "win32" || (!app.isPackaged && !runtimeAppPreferences.developerMode)) return null;
   if (windowsUpdateCheckPromise) return windowsUpdateCheckPromise;
   windowsUpdateCheckPromise = (async () => {
-    const { feedURL } = await resolveWindowsUpdateFeed();
+    const { feedURL } = await resolveWindowsUpdateFeed(fetch, {
+      prerelease: runtimeAppPreferences.developerMode,
+    });
+    if (!app.isPackaged) {
+      const candidateVersion = await fetchWindowsUpdateVersion(new URL("latest.yml", feedURL), fetch);
+      const available = compareMacVersions(candidateVersion, app.getVersion()) === 1;
+      publishUpdateStatus(available ? "available" : "current", available
+        ? { version: candidateVersion, scanOnly: true }
+        : { scanOnly: true });
+      return null;
+    }
+    autoUpdater.allowPrerelease = runtimeAppPreferences.developerMode;
+    autoUpdater.allowDowngrade = false;
     autoUpdater.setFeedURL({ provider: "generic", url: feedURL });
     return autoUpdater.checkForUpdates();
   })();
@@ -935,9 +962,12 @@ function macUpdateDirectory() {
   return path.join(app.getPath("userData"), "Updates");
 }
 
-function macUpdateManifestURL() {
-  const requested = String(process.env.RESONANCE_MAC_UPDATE_MANIFEST_URL || MAC_UPDATE_MANIFEST_URL).trim();
-  return requested || MAC_UPDATE_MANIFEST_URL;
+async function macUpdateManifestURL() {
+  const requested = String(process.env.RESONANCE_MAC_UPDATE_MANIFEST_URL || "").trim();
+  if (requested) return requested;
+  if (!runtimeAppPreferences.developerMode) return MAC_UPDATE_MANIFEST_URL;
+  const { manifestURL } = await resolveMacUpdateManifest(fetch, { prerelease: true });
+  return manifestURL;
 }
 
 function macApplicationBundlePath() {
@@ -996,11 +1026,11 @@ async function downloadMacUpdateArchive(manifest) {
 }
 
 async function checkForMacUpdates() {
-  if (process.platform !== "darwin" || !app.isPackaged) return null;
+  if (process.platform !== "darwin" || (!app.isPackaged && !runtimeAppPreferences.developerMode)) return null;
   if (macUpdateCheckPromise) return macUpdateCheckPromise;
   macUpdateCheckPromise = (async () => {
     publishUpdateStatus("checking");
-    const manifest = await fetchMacUpdateManifest({ manifestURL: macUpdateManifestURL() });
+    const manifest = await fetchMacUpdateManifest({ manifestURL: await macUpdateManifestURL() });
     const currentBuild = Number(desktopPackage.resonanceBuild);
     const available = isMacUpdateAvailable({
       currentVersion: app.getVersion(),
@@ -1012,6 +1042,12 @@ async function checkForMacUpdates() {
       macUpdateManifest = null;
       macUpdateArchivePath = null;
       publishUpdateStatus("current");
+      return null;
+    }
+    if (!app.isPackaged) {
+      macUpdateManifest = null;
+      macUpdateArchivePath = null;
+      publishUpdateStatus("available", { version: manifest.version, scanOnly: true });
       return null;
     }
     macUpdateManifest = manifest;
@@ -1067,7 +1103,9 @@ async function installMacUpdate() {
 }
 
 function runAutomaticUpdateCheck() {
-  if (!desktopUpdatesSupported() || ["available", "downloading", "ready"].includes(currentWindowsUpdateStatus.type)) return;
+  const activeUpdate = ["available", "downloading", "ready"].includes(currentWindowsUpdateStatus.type)
+    && !currentWindowsUpdateStatus.scanOnly;
+  if (!desktopUpdatesSupported() || activeUpdate) return;
   void checkForDesktopUpdates().catch((error) => publishUpdateStatus("error", {
     message: process.platform === "win32" ? conciseUpdaterError(error) : String(error?.message || error),
   }));
@@ -1082,6 +1120,13 @@ function startAutomaticUpdateChecks() {
     automaticUpdateCheckInterval.unref?.();
   }, AUTOMATIC_UPDATE_CHECK_DELAY_MS);
   automaticUpdateCheckTimer.unref?.();
+}
+
+function resetDesktopUpdateStateForChannelChange() {
+  verifiedWindowsUpdate = null;
+  macUpdateManifest = null;
+  macUpdateArchivePath = null;
+  publishUpdateStatus("idle");
 }
 
 function applicationPaths() {
@@ -1497,17 +1542,6 @@ function isDirectServerCacheFile(filePath) {
   const remote = path.resolve(applicationPaths().remote);
   const candidate = path.resolve(filePath);
   return candidate !== remote && path.dirname(candidate) === remote;
-}
-
-async function deleteManagedServerCacheFile(track) {
-  if (!track?.filePath) return true;
-  if (!isDirectServerCacheFile(track.filePath)) return false;
-  try {
-    await fs.rm(path.resolve(track.filePath), { force: true });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function safeListeningHistoryArtworkURL(candidate, serverOrigin) {
@@ -2406,6 +2440,7 @@ function safeAppPreferences(value) {
       : DEFAULT_APP_THEME,
     runInBackground: Boolean(preferences.runInBackground),
     discordRichPresence: Boolean(preferences.discordRichPresence),
+    developerMode: Boolean(preferences.developerMode),
     crossfadeEnabled: Boolean(preferences.crossfadeEnabled),
     crossfadeSeconds: Number.isFinite(requestedCrossfadeSeconds)
       ? Math.max(1, Math.min(12, Math.round(requestedCrossfadeSeconds)))
@@ -2486,7 +2521,13 @@ function ensureBackgroundTray() {
 }
 
 ipcMain.handle("app:preferences:update", (_event, value) => {
+  const previousDeveloperMode = runtimeAppPreferences.developerMode;
   runtimeAppPreferences = safeAppPreferences(value);
+  if (runtimeAppPreferencesLoaded && previousDeveloperMode !== runtimeAppPreferences.developerMode) {
+    resetDesktopUpdateStateForChannelChange();
+  }
+  runtimeAppPreferencesLoaded = true;
+  startAutomaticUpdateChecks();
   if (runtimeAppPreferences.runInBackground) ensureBackgroundTray();
   else if (backgroundTray) {
     backgroundTray.destroy();
@@ -2564,7 +2605,6 @@ app.whenReady().then(async () => {
   await ensureDirectories();
   protocol.handle(SERVER_STREAM_SCHEME, handleServerStreamRequest);
   createWindow();
-  startAutomaticUpdateChecks();
   const startupCallback = authCallbackFromArguments(process.argv);
   if (startupCallback) dispatchAccountAuthCallback(startupCallback);
   drainAccountAuthCallbacks();
@@ -2596,7 +2636,7 @@ app.on("before-quit", () => {
 ipcMain.handle("update:check", async () => {
   if (!desktopUpdatesSupported()) return { supported: false };
   await checkForDesktopUpdates();
-  return { supported: true };
+  return { supported: true, status: currentWindowsUpdateStatus };
 });
 
 ipcMain.handle("update:state", () => currentWindowsUpdateStatus);
@@ -2643,7 +2683,6 @@ ipcMain.handle("library:load", async () => {
     let stored = JSON.parse(await fs.readFile(state, "utf8"));
     const migration = await migrateUnlinkedDownloads(stored, {
       legacyDownloadOwned: (track) => isDirectServerCacheFile(track?.filePath),
-      deleteManagedDownload: deleteManagedServerCacheFile,
     });
     stored = migration.state;
     const storedTracks = Array.isArray(stored.tracks) ? stored.tracks.filter(persistableLibraryTrack) : [];

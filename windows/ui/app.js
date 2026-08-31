@@ -247,6 +247,7 @@ let localImportProviderFocus = "youtube";
 let availableWindowsUpdateVersion = null;
 let dismissedWindowsUpdateVersion = null;
 let windowsUpdateReady = false;
+let updateCheckInProgress = false;
 let updateStatusMessage = "Updates are checked automatically";
 let mediaSessionController = null;
 let mediaSessionConfigured = false;
@@ -5110,7 +5111,7 @@ function renderSettings() {
       </nav>
       <div class="settings-content">
         <section class="settings-panel" data-settings-content="general" ${settingsPanel === "general" ? "" : "hidden"}>
-          <div class="settings-section-heading"><span>WINDOWS</span><p>Control desktop behavior and connected services.</p></div>
+          <div class="settings-section-heading"><span>DESKTOP</span><p>Control desktop behavior and connected services.</p></div>
           <div class="settings-grid">
             <div class="settings-group">
               <label class="settings-row" for="settingsRunInBackground">
@@ -5143,8 +5144,13 @@ function renderSettings() {
               <div class="settings-row">
                 <span class="settings-row-icon" aria-hidden="true">${settingsIcons.update}</span>
                 <span class="settings-row-copy"><strong>Updates</strong><small id="settingsUpdateStatus">${escapeHTML(updateStatusMessage)}</small></span>
-                <span class="settings-automatic-badge">Automatic</span>
+                <button id="settingsCheckForUpdates" class="settings-row-action" type="button" ${updateCheckInProgress ? "disabled" : ""}>${updateCheckInProgress ? "Checking…" : "Check now"}</button>
               </div>
+              <label class="settings-row" for="settingsDeveloperMode">
+                <span class="settings-row-icon" aria-hidden="true">${settingsIcons.keybinds}</span>
+                <span class="settings-row-copy"><strong>Developer Mode</strong><small>Check GitHub prereleases instead of stable releases.</small></span>
+                <span class="settings-toggle"><input id="settingsDeveloperMode" type="checkbox" ${preferences.developerMode ? "checked" : ""}><span class="t-toggle" data-on="${preferences.developerMode}" aria-hidden="true"><span class="t-toggle-thumb"></span></span></span>
+              </label>
               <div class="settings-row">
                 <span class="settings-row-icon" aria-hidden="true">${settingsIcons.refresh}</span>
                 <span class="settings-row-copy"><strong>Refresh song metadata</strong><small id="settingsMetadataRefreshStatus">${escapeHTML(downloadedMetadataRefreshDetail)}</small></span>
@@ -5219,6 +5225,12 @@ function renderSettings() {
     await updateAppPreference("discordRichPresence", discordPresence.checked);
     scheduleDiscordPresenceUpdate();
   };
+  const developerMode = $("#settingsDeveloperMode");
+  if (developerMode) developerMode.onchange = async () => {
+    await updateAppPreference("developerMode", developerMode.checked);
+    setUpdateStatus(developerMode.checked ? "Prerelease update channel" : "Stable update channel");
+    void checkForUpdates();
+  };
   const crossfadeEnabled = $("#settingsCrossfadeEnabled");
   const crossfadeSeconds = $("#settingsCrossfadeSeconds");
   if (crossfadeEnabled) crossfadeEnabled.onchange = async () => {
@@ -5253,6 +5265,7 @@ function renderSettings() {
     renderSettings();
   };
   if ($("#settingsServer")) $("#settingsServer").onclick = openServerSettings;
+  if ($("#settingsCheckForUpdates")) $("#settingsCheckForUpdates").onclick = checkForUpdates;
   if ($("#settingsRefreshMetadata")) $("#settingsRefreshMetadata").onclick = refreshDownloadedSongMetadata;
 
   if (settingsPanel === "server") bindServerSettingsControls();
@@ -10046,12 +10059,33 @@ function setUpdateStatus(message) {
 }
 
 async function checkForUpdates() {
-  setUpdateStatus("Checking for updates…");
+  if (updateCheckInProgress) return;
+  updateCheckInProgress = true;
+  const checkButton = $("#settingsCheckForUpdates");
+  if (checkButton) {
+    checkButton.disabled = true;
+    checkButton.textContent = "Checking…";
+  }
+  setUpdateStatus(state.appPreferences.developerMode
+    ? "Checking for prerelease updates…"
+    : "Checking for updates…");
   try {
     const result = await api.checkForUpdates();
-    if (!result.supported) setUpdateStatus("Available in installed builds");
+    if (!result.supported) {
+      setUpdateStatus("Available in installed builds");
+    } else {
+      const status = result.status || await api.getUpdateStatus();
+      if (status?.type) handleWindowsUpdateStatus(status);
+    }
   } catch (error) {
     setUpdateStatus(error.message || "Update check failed");
+  } finally {
+    updateCheckInProgress = false;
+    const currentButton = $("#settingsCheckForUpdates");
+    if (currentButton) {
+      currentButton.disabled = false;
+      currentButton.textContent = "Check now";
+    }
   }
 }
 
@@ -10077,7 +10111,13 @@ function syncWindowsUpdateBadge(value = {}) {
   if (!["available", "downloading", "ready", "error"].includes(value.type)) return;
 
   badge.hidden = false;
-  if (value.type === "ready") {
+  if (value.type === "available" && value.scanOnly) {
+    windowsUpdateReady = false;
+    detail.textContent = `Resonance ${version} is available. Install a packaged build to update.`;
+    action.textContent = "Packaged builds only";
+    action.dataset.action = "scan-only";
+    action.disabled = true;
+  } else if (value.type === "ready") {
     windowsUpdateReady = true;
     detail.textContent = `Resonance ${version} is ready to install.`;
     action.textContent = "Restart to update";
@@ -10113,9 +10153,13 @@ function handleWindowsUpdateStatus(value = {}) {
   install.hidden = true;
   install.disabled = false;
   if (value.type === "checking") setUpdateStatus("Checking GitHub…");
-  else if (value.type === "available") setUpdateStatus(`Downloading ${value.version}…`);
+  else if (value.type === "available") setUpdateStatus(value.scanOnly
+    ? `${value.version} available · packaged builds only`
+    : `Downloading ${value.version}…`);
   else if (value.type === "downloading") setUpdateStatus(`Downloading… ${value.percent}%`);
-  else if (value.type === "current") setUpdateStatus("You’re up to date");
+  else if (value.type === "current") setUpdateStatus(value.channel === "prerelease"
+    ? "No newer prerelease is available"
+    : "You’re up to date");
   else if (value.type === "error") setUpdateStatus(value.message || "Update check failed");
 }
 

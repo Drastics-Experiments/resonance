@@ -3,8 +3,8 @@ const { spawn } = require("node:child_process");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 
-// The macOS app predates the Electron client and intentionally does not use
-// electron-updater.  Its release contract is a small manifest plus a signed
+// The macOS updater intentionally does not use electron-updater. Its release
+// contract is a small manifest plus a signed
 // zip archive installed by the bundled `install-update.sh` helper.  Keep this
 // module free of Electron dependencies so the validation and redirect gates
 // can be exercised from Node tests on every host.

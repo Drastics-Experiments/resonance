@@ -70,6 +70,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             val state by viewModel.uiState.collectAsStateWithLifecycle()
             val updateState by updateManager.state.collectAsStateWithLifecycle()
+            val developerMode by updateManager.developerMode.collectAsStateWithLifecycle()
             LaunchedEffect(Unit) {
                 viewModel.importRequests.collect { importLauncher.launch(arrayOf("audio/*", "video/*")) }
             }
@@ -91,6 +92,8 @@ class MainActivity : ComponentActivity() {
                 state = state,
                 actions = viewModel,
                 updateState = updateState,
+                developerMode = developerMode,
+                onDeveloperModeChanged = ::setDeveloperMode,
                 onDownloadUpdate = ::downloadUpdate,
                 onInstallUpdate = ::installDownloadedUpdate,
                 onDismissUpdate = updateManager::dismiss,
@@ -128,6 +131,11 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             updateManager.downloadUpdate(update)?.let(::launchDownloadedUpdate)
         }
+    }
+
+    private fun setDeveloperMode(enabled: Boolean) {
+        updateManager.setDeveloperMode(enabled)
+        lifecycleScope.launch { updateManager.checkForUpdateOnStartup() }
     }
 
     private fun installDownloadedUpdate(update: AndroidUpdateInfo) {

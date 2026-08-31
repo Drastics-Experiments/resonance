@@ -3605,7 +3605,6 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 .storage-select { color: #9a7cff; font-size: 17px; }
 .storage-select.selected { color: #b197ff; }
 .row-menu { color: #d4d6df; font-weight: 800; letter-spacing: 2px; }
-.settings-automatic-badge { padding: 7px 10px; border: 1px solid var(--accent-border); border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: 9px; font-weight: 750; letter-spacing: .3px; }
 .server-page {
   position: relative;
   min-height: 100%;

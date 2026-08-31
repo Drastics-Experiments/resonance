@@ -22,13 +22,13 @@ final class MobileUnlinkedDownloadMigrationPolicyTests: XCTestCase {
         )
     }
 
-    func testUnlinkedManagedDownloadIsSelectedForCleanup() {
+    func testUnlinkedManagedDownloadIsRetainedWithoutADeletionDecision() {
         let decision = MobileUnlinkedDownloadMigrationPolicy.decision(
             for: track(),
             legacyDownloadOwned: true
         )
 
-        XCTAssertTrue(decision.shouldDelete)
+        XCTAssertFalse(decision.shouldDelete)
         XCTAssertEqual(decision.track.preservesUnlinkedImport, false)
     }
 
@@ -61,6 +61,129 @@ final class MobileUnlinkedDownloadMigrationPolicyTests: XCTestCase {
 
         XCTAssertFalse(decision.shouldDelete)
         XCTAssertEqual(decision.track.preservesUnlinkedImport, true)
+    }
+
+    func testLegacyLibraryRetainsTracksAndEveryCollectionReference() {
+        let managedID = UUID()
+        let importedID = UUID()
+        let managed = MobileTrack(
+            id: managedID,
+            title: "Downloaded from the server",
+            artist: "Artist",
+            album: "Album",
+            duration: 180,
+            relativePath: "resonance-download-11111111-1111-4111-8111-111111111111.m4a",
+            remoteID: "remote-song",
+            sourceServer: "https://music.example"
+        )
+        let imported = MobileTrack(
+            id: importedID,
+            title: "Local import",
+            artist: "Artist",
+            album: "Imported",
+            duration: 120,
+            relativePath: "Local import.m4a"
+        )
+        let playlist = MobilePlaylist(
+            id: UUID(),
+            name: "Keep this mix",
+            trackIDs: [managedID, importedID]
+        )
+        let profilePlaylist = MobilePlaylist(
+            id: UUID(),
+            name: "Profile mix",
+            trackIDs: [managedID]
+        )
+        let profileState = MobileProfileSyncState(
+            playlists: [profilePlaylist],
+            playlistRevision: 4,
+            knownRemotePlaylistIDs: [],
+            dirtyPlaylistIDs: [profilePlaylist.id],
+            deletedPlaylistIDs: [],
+            playlistSyncServerURL: nil,
+            remoteLikedSongIDs: ["remote-song"],
+            dirtyRemoteLikeSongIDs: ["remote-song"],
+            likesDirty: true
+        )
+        let history = MobileListeningHistoryEntry(
+            trackID: managedID,
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            listenedSeconds: 42,
+            serverOrigin: "https://music.example:443",
+            syncProfileID: "default",
+            remoteSongID: "remote-song",
+            title: managed.title,
+            artist: managed.artist,
+            album: managed.album,
+            duration: managed.duration
+        )
+        let snapshot = MobilePlaybackSnapshot(
+            version: MobilePlaybackSnapshot.currentVersion,
+            queue: [
+                MobilePlaybackQueueReference(
+                    trackID: managedID,
+                    remoteIdentity: managed.remoteIdentity()
+                ),
+                MobilePlaybackQueueReference(trackID: importedID, remoteIdentity: nil),
+            ],
+            playlistID: playlist.id,
+            currentTrack: MobilePlaybackQueueReference(
+                trackID: managedID,
+                remoteIdentity: managed.remoteIdentity()
+            ),
+            history: [MobilePlaybackQueueReference(trackID: managedID, remoteIdentity: managed.remoteIdentity())]
+        )
+        var legacy = storedLibrary(serverURL: "https://music.example")
+        legacy.tracks = [managed, imported]
+        legacy.playlists = [playlist]
+        legacy.favorites = [managedID, importedID]
+        legacy.profileStates = [
+            MobileServerContext(origin: "https://music.example:443", profileID: "default"): profileState
+        ]
+        legacy.playbackQueue = [managedID, importedID]
+        legacy.playbackPlaylistID = playlist.id
+        legacy.playbackSnapshot = snapshot
+        legacy.listeningHistory = [history]
+
+        let migrated = MobileUnlinkedDownloadMigrationPolicy.migrate(legacy) { track in
+            track.id == managedID
+        }
+
+        XCTAssertEqual(migrated.tracks.map(\.id), legacy.tracks.map(\.id))
+        XCTAssertEqual(migrated.playlists, legacy.playlists)
+        XCTAssertEqual(migrated.favorites, legacy.favorites)
+        XCTAssertEqual(migrated.profileStates, legacy.profileStates)
+        XCTAssertEqual(migrated.playbackQueue, legacy.playbackQueue)
+        XCTAssertEqual(migrated.playbackPlaylistID, legacy.playbackPlaylistID)
+        XCTAssertEqual(migrated.playbackSnapshot, legacy.playbackSnapshot)
+        XCTAssertEqual(migrated.listeningHistory, legacy.listeningHistory)
+        XCTAssertEqual(migrated.tracks[0].preservesUnlinkedImport, false)
+        XCTAssertEqual(migrated.tracks[1].preservesUnlinkedImport, true)
+        XCTAssertTrue(migrated.completedMigrations?.contains(MobileUnlinkedDownloadMigrationPolicy.identifier) == true)
+    }
+
+    func testPartialLegacyMigrationWithExplicitServerFlagIsStillPreserved() {
+        let managed = track(preservesUnlinkedImport: false)
+        var legacy = storedLibrary(serverURL: "https://music.example")
+        legacy.tracks = [managed]
+
+        let migrated = MobileUnlinkedDownloadMigrationPolicy.migrate(legacy) { _ in true }
+
+        XCTAssertEqual(migrated.tracks, [managed])
+        XCTAssertTrue(migrated.completedMigrations?.contains(MobileUnlinkedDownloadMigrationPolicy.identifier) == true)
+    }
+
+    func testHistoricalCompletionMarkerMakesMigrationANoopForRollbackSafety() {
+        var legacy = storedLibrary(serverURL: "https://music.example")
+        legacy.tracks = [track()]
+        legacy.completedMigrations = [MobileUnlinkedDownloadMigrationPolicy.identifier]
+
+        let migrated = MobileUnlinkedDownloadMigrationPolicy.migrate(legacy) { _ in
+            XCTFail("Completed migration must not inspect or mutate tracks")
+            return true
+        }
+
+        XCTAssertEqual(migrated, legacy)
     }
 }
 

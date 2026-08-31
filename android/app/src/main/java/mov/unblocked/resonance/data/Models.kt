@@ -131,6 +131,11 @@ object DownloadedSongMetadataRefreshPolicy {
 }
 
 object UnlinkedDownloadMigrationPolicy {
+    /**
+     * Retired compatibility marker for libraries written before source links were persisted.
+     * Keep the historical identifier so rolling back cannot make an older build retry its
+     * destructive implementation. The current migration only annotates legacy tracks.
+     */
     const val Identifier = "delete-unlinked-downloads-v1"
 
     data class Decision(
@@ -144,14 +149,28 @@ object UnlinkedDownloadMigrationPolicy {
         } else {
             track
         }
-        val hasRemoteIdentity = listOf(migrated.remoteID, migrated.sourceServer)
-            .any { !it.isNullOrBlank() }
-        val hasSourceLink = ProviderMediaURLPolicy.persistableSourceURL(migrated.sourceURL) != null ||
-            ProviderMediaURLPolicy.persistableDownloadURL(migrated.downloadSourceURL) != null
-        return Decision(
-            track = migrated,
-            shouldDelete = (hasRemoteIdentity || legacyDownloadOwned) &&
-                !hasSourceLink && migrated.preservesUnlinkedImport != true,
+        // A legacy source-link omission is not evidence that either the file or its
+        // references can be discarded. Keep this field for migration callers/tests that
+        // inspect the old decision shape, but make the safe behavior explicit.
+        return Decision(track = migrated, shouldDelete = false)
+    }
+
+    /**
+     * Migrates a legacy library without touching media or collection references.
+     * [legacyDownloadOwned] only determines the compatibility annotation; it must never be
+     * used as permission to remove a track or its file.
+     */
+    fun migrate(
+        library: StoredLibrary,
+        legacyDownloadOwned: (Track) -> Boolean,
+    ): StoredLibrary {
+        if (Identifier in library.completedMigrations) return library
+        val migratedTracks = library.tracks.map { track ->
+            decision(track, legacyDownloadOwned(track)).track
+        }
+        return library.copy(
+            tracks = migratedTracks,
+            completedMigrations = library.completedMigrations + Identifier,
         )
     }
 }

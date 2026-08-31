@@ -293,10 +293,15 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           pkgutil --payload-files installers/macos/dist/Resonance-Installer.pkg | grep -Eq '(^|/)Resonance\.app/Contents/MacOS/Resonance$'
           if [[ "$EXPECTED_SIGNING" == "production" ]]; then
+            /usr/libexec/PlistBuddy -c "Print :ResonanceUpdateAuthenticity" "$app/Contents/Info.plist" | grep -Fxq production
+            /usr/libexec/PlistBuddy -c "Print :ResonanceUpdateTeamIdentifier" "$app/Contents/Info.plist" | grep -Fxq "$MAC_UPDATE_TEAM_ID"
+            /usr/libexec/PlistBuddy -c "Print :ResonanceUpdateDesignatedRequirement" "$app/Contents/Info.plist" | grep -Fxq "$MAC_UPDATE_DESIGNATED_REQUIREMENT"
             spctl --assess --type execute --verbose=4 "$app"
             spctl --assess --type install --verbose=4 installers/macos/dist/Resonance-Installer.pkg
             xcrun stapler validate "$app"
             xcrun stapler validate installers/macos/dist/Resonance-Installer.pkg
+          else
+            /usr/libexec/PlistBuddy -c "Print :ResonanceUpdateAuthenticity" "$app/Contents/Info.plist" | grep -Fxq development
           fi
 
       - name: Record verified macOS signing evidence

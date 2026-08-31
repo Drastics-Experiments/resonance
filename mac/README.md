@@ -8,6 +8,12 @@ client with Electron-builder. The renderer runs only through Electron's preload
 bridge; the remote preview endpoint distributes source for local app builds
 rather than rendering the application in a web browser.
 
+Settings persists a Developer Mode update channel. Stable mode uses GitHub's
+latest stable macOS manifest; Developer Mode selects the newest published,
+non-draft prerelease containing `latest-mac.json` and never falls back to a
+stable release. Both channels keep the same archive checksum, bundle identity,
+and signing-policy validation.
+
 ## Develop
 
 ```bash
