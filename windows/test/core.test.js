@@ -2476,7 +2476,7 @@ test("installs downloaded Windows updates silently in place", () => {
   assert.match(mainSource, /autoUpdater\.autoDownload = true/);
   assert.match(mainSource, /autoUpdater\.autoInstallOnAppQuit = false/);
   assert.match(mainSource, /verifyDownloadedWindowsUpdate\(\{[\s\S]+downloadedFile: information\?\.downloadedFile[\s\S]+authenticityMode: desktopPackage\.resonanceUpdateAuthenticity/);
-  assert.match(mainSource, /if \(!verifiedWindowsUpdate \|\| windowsUpdateVerificationPromise\) return false/);
+  assert.match(mainSource, /verifiedWindowsUpdate\.generation !== desktopUpdateChannel\.capture\(\)[\s\S]+windowsUpdateVerificationPromise/);
   assert.match(mainSource, /installDownloadedWindowsUpdate\(autoUpdater\)/);
   assert.doesNotMatch(mainSource, /autoUpdater\.quitAndInstall\(false, true\)/);
   assert.match(appSource, /Restarting to finish the update/);
@@ -2485,12 +2485,17 @@ test("installs downloaded Windows updates silently in place", () => {
   assert.match(appSource, /const status = result\.status \|\| await api\.getUpdateStatus\(\)/);
   assert.match(appSource, /Updates are checked automatically/);
   assert.match(appSource, /Check GitHub prereleases instead of stable releases[\s\S]+id="settingsDeveloperMode"/);
-  assert.match(mainSource, /resolveWindowsUpdateFeed\(fetch, \{[\s\S]+prerelease: runtimeAppPreferences\.developerMode/);
-  assert.match(mainSource, /autoUpdater\.allowPrerelease = runtimeAppPreferences\.developerMode/);
+  assert.match(mainSource, /resolveWindowsUpdateFeed\(fetch, \{[\s\S]+prerelease: developerMode/);
+  assert.match(mainSource, /const developerMode = runtimeAppPreferences\.developerMode[\s\S]+autoUpdater\.allowPrerelease = developerMode/);
   assert.match(mainSource, /autoUpdater\.allowDowngrade = false/);
   assert.match(mainSource, /resolveMacUpdateManifest\(fetch, \{ prerelease: true \}\)/);
   assert.match(mainSource, /app\.isPackaged \|\| runtimeAppPreferences\.developerMode/);
   assert.match(mainSource, /scanOnly: true/);
+  assert.match(mainSource, /desktopUpdateChannel\.invalidate\(\)[\s\S]+windowsUpdateCancellation\?\.token\?\.cancel\(\)/);
+  assert.match(mainSource, /const verificationPromise = windowsUpdateVerificationPromise;[\s\S]+if \(verificationPromise\) await verificationPromise;[\s\S]+if \(!desktopUpdateChannel\.isCurrent\(generation\)\) return null/);
+  assert.match(mainSource, /publishUpdateStatusForGeneration\(generation, "ready"/);
+  assert.match(mainSource, /macUpdateArtifactGeneration !== generation/);
+  assert.match(mainSource, /authorizeInstall: \(\) => desktopUpdateChannel\.isCurrent\(generation\)/);
   assert.match(htmlSource, /Restart &amp; update/);
   assert.match(readmeSource, /runs the verified NSIS update silently/);
   assert.match(readmeSource, /does not show the setup wizard/);

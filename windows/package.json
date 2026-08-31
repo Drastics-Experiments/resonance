@@ -70,6 +70,7 @@
       "updater-feed.cjs",
       "response-body.cjs",
       "updater-auth.cjs",
+      "update-channel.cjs",
       "preload.cjs",
       "package.json",
       "resonance.ico",
