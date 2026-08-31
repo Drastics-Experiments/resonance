@@ -88,6 +88,7 @@ export function createEmptyState() {
       theme: DEFAULT_APP_THEME,
       runInBackground: false,
       discordRichPresence: false,
+      developerMode: false,
       crossfadeEnabled: false,
       crossfadeSeconds: 5,
       keybinds: {
@@ -203,6 +204,7 @@ export function normalizedAppPreferences(value) {
     theme: normalizedAppTheme(preferences.theme),
     runInBackground: Boolean(preferences.runInBackground),
     discordRichPresence: Boolean(preferences.discordRichPresence),
+    developerMode: Boolean(preferences.developerMode),
     crossfadeEnabled: Boolean(preferences.crossfadeEnabled),
     crossfadeSeconds: normalizedCrossfadeSeconds(preferences.crossfadeSeconds),
     keybinds: Object.fromEntries(Object.entries(DEFAULT_KEYBINDS).map(([action, fallback]) => [

@@ -90,7 +90,13 @@ import serverDownload from "../server-download.cjs";
 import updaterFeed from "../updater-feed.cjs";
 import discordRPC from "../discord-rpc.cjs";
 
-const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = updaterFeed;
+const {
+  conciseUpdaterError,
+  fetchWindowsUpdateVersion,
+  installDownloadedWindowsUpdate,
+  resolveMacUpdateManifest,
+  resolveWindowsUpdateFeed,
+} = updaterFeed;
 const { isManagedLibraryFile } = libraryPaths;
 const {
   SERVER_DOWNLOAD_ATTEMPTS,
@@ -2363,12 +2369,94 @@ test("selects the newest stable release that actually has a Windows update feed"
   });
 });
 
+test("developer update feeds select prereleases with the required platform manifest", async () => {
+  const releases = [
+    {
+      tag_name: "v1.3.0-beta.1",
+      draft: true,
+      prerelease: true,
+      assets: [
+        { name: "latest.yml", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.3.0-beta.1/latest.yml" },
+      ],
+    },
+    {
+      tag_name: "v1.2.1-beta.1",
+      draft: false,
+      prerelease: true,
+      assets: [{ name: "notes.txt", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.1-beta.1/notes.txt" }],
+    },
+    {
+      tag_name: "v1.1.0",
+      draft: false,
+      prerelease: false,
+      assets: [
+        { name: "latest.yml", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.1.0/latest.yml" },
+        { name: "latest-mac.json", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.1.0/latest-mac.json" },
+      ],
+    },
+    {
+      tag_name: "v1.2.0-beta.1",
+      draft: false,
+      prerelease: true,
+      assets: [
+        { name: "latest.yml", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.0-beta.1/latest.yml" },
+        { name: "latest-mac.json", browser_download_url: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.0-beta.1/latest-mac.json" },
+      ],
+    },
+  ];
+  const fetchImpl = async () => ({ ok: true, json: async () => releases });
+  assert.deepEqual(await resolveWindowsUpdateFeed(fetchImpl, { prerelease: true }), {
+    tag: "v1.2.0-beta.1",
+    feedURL: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.0-beta.1/",
+  });
+  assert.deepEqual(await resolveMacUpdateManifest(fetchImpl, { prerelease: true }), {
+    tag: "v1.2.0-beta.1",
+    manifestURL: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.0-beta.1/latest-mac.json",
+  });
+  assert.deepEqual(await resolveWindowsUpdateFeed(fetchImpl), {
+    tag: "v1.1.0",
+    feedURL: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.1.0/",
+  });
+
+  const unsafeFetch = async () => ({
+    ok: true,
+    json: async () => [{
+      tag_name: "v9.0.0-beta.1",
+      draft: false,
+      prerelease: true,
+      assets: [{ name: "latest.yml", browser_download_url: "https://evil.example/latest.yml" }],
+    }],
+  });
+  await assert.rejects(
+    resolveWindowsUpdateFeed(unsafeFetch, { prerelease: true }),
+    /unsafe desktop update URL/,
+  );
+});
+
+test("developer source builds can scan a bounded Windows manifest without installing", async () => {
+  const fetchImpl = async () => ({
+    ok: true,
+    text: async () => "version: 2.1.0-beta.3\npath: Resonance-Setup-2.1.0-beta.3.exe\n",
+  });
+  assert.equal(
+    await fetchWindowsUpdateVersion(
+      "https://github.com/Drastics-Experiments/resonance/releases/download/v2.1.0-beta.3/latest.yml",
+      fetchImpl,
+    ),
+    "2.1.0-beta.3",
+  );
+  await assert.rejects(
+    fetchWindowsUpdateVersion("https://evil.example/latest.yml", fetchImpl),
+    /unsafe/,
+  );
+});
+
 test("rejects release lists without a Windows manifest and shortens updater errors", async () => {
   const fetchImpl = async () => ({
     ok: true,
     json: async () => [{ tag_name: "android-v1.0.4", assets: [] }],
   });
-  await assert.rejects(resolveWindowsUpdateFeed(fetchImpl), /No published Windows release/);
+  await assert.rejects(resolveWindowsUpdateFeed(fetchImpl), /No published stable release contains latest\.yml/);
   assert.equal(
     conciseUpdaterError(new Error("Cannot find latest.yml: 404 Not Found\nvery long response headers and stack")),
     "The Windows update feed is temporarily unavailable.",
@@ -2388,12 +2476,26 @@ test("installs downloaded Windows updates silently in place", () => {
   assert.match(mainSource, /autoUpdater\.autoDownload = true/);
   assert.match(mainSource, /autoUpdater\.autoInstallOnAppQuit = false/);
   assert.match(mainSource, /verifyDownloadedWindowsUpdate\(\{[\s\S]+downloadedFile: information\?\.downloadedFile[\s\S]+authenticityMode: desktopPackage\.resonanceUpdateAuthenticity/);
-  assert.match(mainSource, /if \(!verifiedWindowsUpdate \|\| windowsUpdateVerificationPromise\) return false/);
+  assert.match(mainSource, /verifiedWindowsUpdate\.generation !== desktopUpdateChannel\.capture\(\)[\s\S]+windowsUpdateVerificationPromise/);
   assert.match(mainSource, /installDownloadedWindowsUpdate\(autoUpdater\)/);
   assert.doesNotMatch(mainSource, /autoUpdater\.quitAndInstall\(false, true\)/);
   assert.match(appSource, /Restarting to finish the update/);
-  assert.doesNotMatch(htmlSource, /Check for updates|Automatic in-app updates/);
+  assert.match(appSource, /id="settingsCheckForUpdates"[\s\S]+Check now/);
+  assert.match(appSource, /settingsCheckForUpdates"\)\.onclick = checkForUpdates/);
+  assert.match(appSource, /const status = result\.status \|\| await api\.getUpdateStatus\(\)/);
   assert.match(appSource, /Updates are checked automatically/);
+  assert.match(appSource, /Check GitHub prereleases instead of stable releases[\s\S]+id="settingsDeveloperMode"/);
+  assert.match(mainSource, /resolveWindowsUpdateFeed\(fetch, \{[\s\S]+prerelease: developerMode/);
+  assert.match(mainSource, /const developerMode = runtimeAppPreferences\.developerMode[\s\S]+autoUpdater\.allowPrerelease = developerMode/);
+  assert.match(mainSource, /autoUpdater\.allowDowngrade = false/);
+  assert.match(mainSource, /resolveMacUpdateManifest\(fetch, \{ prerelease: true \}\)/);
+  assert.match(mainSource, /app\.isPackaged \|\| runtimeAppPreferences\.developerMode/);
+  assert.match(mainSource, /scanOnly: true/);
+  assert.match(mainSource, /desktopUpdateChannel\.invalidate\(\)[\s\S]+windowsUpdateCancellation\?\.token\?\.cancel\(\)/);
+  assert.match(mainSource, /const verificationPromise = windowsUpdateVerificationPromise;[\s\S]+if \(verificationPromise\) await verificationPromise;[\s\S]+if \(!desktopUpdateChannel\.isCurrent\(generation\)\) return null/);
+  assert.match(mainSource, /publishUpdateStatusForGeneration\(generation, "ready"/);
+  assert.match(mainSource, /macUpdateArtifactGeneration !== generation/);
+  assert.match(mainSource, /authorizeInstall: \(\) => desktopUpdateChannel\.isCurrent\(generation\)/);
   assert.match(htmlSource, /Restart &amp; update/);
   assert.match(readmeSource, /runs the verified NSIS update silently/);
   assert.match(readmeSource, /does not show the setup wizard/);
@@ -2408,6 +2510,8 @@ test("checks automatically and shows a dismissible top-right Windows update badg
 
   assert.match(mainSource, /AUTOMATIC_UPDATE_CHECK_INTERVAL_MS = 5 \* 60 \* 1000/);
   assert.match(mainSource, /function startAutomaticUpdateChecks\(\)[\s\S]+setInterval\(runAutomaticUpdateCheck, AUTOMATIC_UPDATE_CHECK_INTERVAL_MS\)/);
+  assert.match(mainSource, /app:preferences:update[\s\S]+runtimeAppPreferencesLoaded = true;[\s\S]+startAutomaticUpdateChecks\(\)/);
+  assert.doesNotMatch(mainSource, /createWindow\(\);\s*startAutomaticUpdateChecks\(\)/);
   assert.match(mainSource, /\["available", "downloading", "ready"\]\.includes\(currentWindowsUpdateStatus\.type\)/);
   assert.match(mainSource, /ipcMain\.handle\("update:state", \(\) => currentWindowsUpdateStatus\)/);
   assert.match(preloadSource, /getUpdateStatus: \(\) => ipcRenderer\.invoke\("update:state"\)/);

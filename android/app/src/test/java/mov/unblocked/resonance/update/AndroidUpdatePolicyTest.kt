@@ -32,6 +32,19 @@ class AndroidUpdatePolicyTest {
     }
 
     @Test
+    fun forcedDeveloperChecksBypassTheNormalResumeThrottle() {
+        val interval = AndroidUpdateCheckPolicy.DefaultIntervalMillis
+
+        assertTrue(
+            AndroidUpdateCheckPolicy.shouldCheck(
+                lastSuccessfulCheckMillis = 1_000L,
+                nowMillis = 1_000L + interval - 1L,
+                force = true,
+            ),
+        )
+    }
+
+    @Test
     fun clockRollbackDoesNotSuppressUpdateChecks() {
         assertEquals(true, AndroidUpdateCheckPolicy.shouldCheck(10_000L, 9_000L))
     }
@@ -86,6 +99,113 @@ class AndroidUpdatePolicyTest {
                 6,
             ),
         )
+        assertTrue(
+            AndroidUpdateNetworkPolicy.isAllowedURL(
+                "https://api.github.com/repos/Drastics-Experiments/resonance/releases?per_page=30",
+            ),
+        )
+    }
+
+    @Test
+    fun developerChannelSelectsNewestPublishedPrereleaseManifest() {
+        val manifestURL = AndroidUpdatePolicy.prereleaseManifestURL(
+            """
+            [
+              {
+                "draft": false,
+                "prerelease": true,
+                "published_at": "2026-08-31T12:00:00Z",
+                "assets": [{
+                  "name": "latest-android.json",
+                  "browser_download_url": "https://github.com/Drastics-Experiments/resonance/releases/download/v2.1.0-beta/latest-android.json"
+                }]
+              },
+              {
+                "draft": false,
+                "prerelease": true,
+                "published_at": "2026-08-30T12:00:00Z",
+                "assets": [{
+                  "name": "latest-android.json",
+                  "browser_download_url": "https://github.com/Drastics-Experiments/resonance/releases/download/v2.0.0-beta/latest-android.json"
+                }]
+              }
+            ]
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            "https://github.com/Drastics-Experiments/resonance/releases/download/v2.1.0-beta/latest-android.json",
+            manifestURL,
+        )
+    }
+
+    @Test
+    fun developerChannelSkipsDraftStableAndManifestlessReleases() {
+        val manifestURL = AndroidUpdatePolicy.prereleaseManifestURL(
+            """
+            [
+              {
+                "draft": true,
+                "prerelease": true,
+                "published_at": "2026-09-02T12:00:00Z",
+                "assets": [{
+                  "name": "latest-android.json",
+                  "browser_download_url": "https://github.com/Drastics-Experiments/resonance/releases/download/v3.0.0-beta/latest-android.json"
+                }]
+              },
+              {
+                "draft": false,
+                "prerelease": false,
+                "published_at": "2026-09-01T12:00:00Z",
+                "assets": [{
+                  "name": "latest-android.json",
+                  "browser_download_url": "https://github.com/Drastics-Experiments/resonance/releases/download/v3.0.0/latest-android.json"
+                }]
+              },
+              {
+                "draft": false,
+                "prerelease": true,
+                "published_at": "2026-08-31T12:00:00Z",
+                "assets": [{"name": "Resonance-Android.apk"}]
+              },
+              {
+                "draft": false,
+                "prerelease": true,
+                "published_at": "2026-08-30T12:00:00Z",
+                "assets": [{
+                  "name": "latest-android.json",
+                  "browser_download_url": "https://github.com/Drastics-Experiments/resonance/releases/download/v2.0.0-beta/latest-android.json"
+                }]
+              }
+            ]
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            "https://github.com/Drastics-Experiments/resonance/releases/download/v2.0.0-beta/latest-android.json",
+            manifestURL,
+        )
+    }
+
+    @Test
+    fun developerChannelRejectsUntrustedManifestAssetURL() {
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            AndroidUpdatePolicy.prereleaseManifestURL(
+                """
+                [{
+                  "draft": false,
+                  "prerelease": true,
+                  "published_at": "2026-08-31T12:00:00Z",
+                  "assets": [{
+                    "name": "latest-android.json",
+                    "browser_download_url": "https://evil.example/latest-android.json"
+                  }]
+                }]
+                """.trimIndent(),
+            )
+        }
+
+        assertEquals("The prerelease update manifest URL is not secure.", error.message)
     }
 
     @Test

@@ -28,7 +28,9 @@ The debug APK is intended for development and emulator testing. It is not a sign
 
 ## Direct-download updates
 
-Production builds check the latest GitHub Release for `latest-android.json` whenever the app starts, then check again when the app resumes if the last successful check was at least six hours ago. When a newer `versionCode` is available, Resonance downloads the APK, verifies its SHA-256 checksum, package ID, and signing certificate, then hands it to Android's system installer. Android may require the user to allow Resonance as an install source once and asks the user to confirm installation.
+Production builds check the latest stable GitHub Release for `latest-android.json` whenever the app starts, then check again when the app resumes if the last successful check was at least six hours ago. Settings includes a persisted **Developer Mode** switch; when enabled, the updater queries GitHub's published prereleases and uses the newest prerelease containing `latest-android.json` instead of the stable feed. When a newer `versionCode` is available, Resonance downloads the APK, verifies its SHA-256 checksum, package ID, and signing certificate, then hands it to Android's system installer. Android may require the user to allow Resonance as an install source once and asks the user to confirm installation.
+
+Prerelease packages must include `latest-android.json` and an APK signed with the same certificate as the installed app. Developer Mode forces a scan on every startup/resume instead of applying the normal six-hour throttle, but does not weaken checksum, package-identity, HTTPS-host, or signing-certificate verification. Turn it off to return to stable updates.
 
 Tagged builds require a permanent release keystore. Configure these GitHub Actions secrets before publishing the first updater-compatible release:
 

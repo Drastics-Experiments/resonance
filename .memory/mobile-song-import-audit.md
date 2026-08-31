@@ -19,3 +19,10 @@ Audited current HEAD `645f0f2` on 2026-08-26. This was a read-only app-code audi
 ## Latent concurrency note
 
 - Concurrent duplicate source downloads are not guarded atomically in current mobile import services. Current playlist imports are sequential, so this is not presently user-reproducible; carry the adoption-gate work from `f20fae9` before enabling concurrent mobile downloads.
+
+## 2026-08-30 follow-up at `93da774`
+
+- Android and iOS Spotify playlist resolution is unbounded before per-track artwork hydration and YouTube matching. Apply the desktop 500-item cap before network fan-out and expose truncation in both UIs.
+- Mobile SoundCloud imports cap playlists at 500 but do not accurately communicate truncation. Android also rejects valid unknown-length/chunked full-media responses; validate the final bounded byte count/hash instead of requiring a known `Content-Length`.
+- iOS YouTube resolution accepts only direct format URLs and cannot handle cipher-only player formats. Keep this as a provider-drift release risk and cover it with a cipher-only fixture or move deciphering to the server-side resolver.
+- Android and iOS server/import transfers use foreground-lifetime work rather than durable background tasks. Android cancellation also cannot reliably interrupt a blocked `HttpURLConnection` read. Do not promise resumable transfers until task persistence and cancellation are implemented.

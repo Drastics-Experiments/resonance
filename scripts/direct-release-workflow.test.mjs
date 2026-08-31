@@ -18,12 +18,9 @@ test("direct release workflow is dispatch-only and calls all platform builders",
   assert.match(workflow, /environment: production-release/);
   assert.match(workflow, /github\.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /\[\[ "\$\(git rev-parse origin\/main\)" == "\$SOURCE_SHA" \]\]/);
-  assert.equal(
-    (workflow.match(/production_signing: \$\{\{ needs\.prepare\.outputs\.unsigned_desktop != 'true' \}\}/g) || []).length,
-    2,
-  );
-  assert.match(workflow, /android:[\s\S]+production_signing: true/);
-  assert.match(workflow, /--allow-unsigned-desktop-release/);
+  assert.match(workflow, /\[\[ "\$UNSIGNED_DESKTOP" == "false" \]\][\s\S]+require production-signed macOS and Windows artifacts/);
+  assert.equal((workflow.match(/production_signing: true/g) || []).length, 3);
+  assert.doesNotMatch(workflow, /--allow-unsigned-desktop-release/);
   assert.match(
     workflow,
     /REPLACE_PRERELEASE[\s\S]+git show-ref --verify --quiet "refs\/tags\/\$\{TAG\}"[\s\S]+releases\/tags\/\$\{TAG\}[\s\S]+\.prerelease[\s\S]+== "true"/,
@@ -101,6 +98,10 @@ test("macOS builds the shared Electron client and keeps the release asset contra
   assert.match(workflow, /Resonance-macOS\.zip/);
   assert.match(workflow, /Resonance-Installer\.pkg/);
   assert.match(workflow, /latest-mac\.json/);
+  assert.match(
+    workflow,
+    /EXPECTED_SIGNING[\s\S]+ResonanceUpdateAuthenticity[\s\S]+grep -Fxq production[\s\S]+ResonanceUpdateTeamIdentifier[\s\S]+ResonanceUpdateDesignatedRequirement/,
+  );
   assert.doesNotMatch(workflow, /swift (?:build|package|test|--version)/i);
   assert.doesNotMatch(workflow, /mac\/scripts\/(?:build-release|test)\.sh/);
 });

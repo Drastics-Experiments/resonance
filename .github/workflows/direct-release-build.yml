@@ -26,7 +26,7 @@ on:
         type: boolean
         default: false
       unsigned_desktop:
-        description: Explicitly build macOS and Windows without production signing.
+        description: Legacy compatibility input. Stable direct releases require false.
         required: true
         type: boolean
         default: false
@@ -82,7 +82,10 @@ jobs:
         run: |
           [[ "$GITHUB_REF" == "refs/heads/main" ]]
           [[ "$PRODUCTION_RELEASE" == "true" ]]
-          [[ "$UNSIGNED_DESKTOP" == "true" || "$UNSIGNED_DESKTOP" == "false" ]]
+          [[ "$UNSIGNED_DESKTOP" == "false" ]] || {
+            echo "::error::Stable direct releases require production-signed macOS and Windows artifacts."
+            exit 1
+          }
           [[ "$REPLACE_PRERELEASE" == "true" || "$REPLACE_PRERELEASE" == "false" ]]
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$BUILD" =~ ^[1-9][0-9]*$ ]]
@@ -122,13 +125,8 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          if [[ "$UNSIGNED_DESKTOP" == "true" ]]; then
-            echo "desktop_signing=unsigned" >> "$GITHUB_OUTPUT"
-            echo "unsigned_desktop=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "desktop_signing=production" >> "$GITHUB_OUTPUT"
-            echo "unsigned_desktop=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "desktop_signing=production" >> "$GITHUB_OUTPUT"
+          echo "unsigned_desktop=false" >> "$GITHUB_OUTPUT"
 
       - name: Record exact source
         id: source
@@ -188,7 +186,7 @@ jobs:
       RESONANCE_MACOS_NOTARY_ISSUER_ID: ${{ secrets.RESONANCE_MACOS_NOTARY_ISSUER_ID }}
     with:
       release_candidate: true
-      production_signing: ${{ needs.prepare.outputs.unsigned_desktop != 'true' }}
+      production_signing: true
       version_override: true
       version: ${{ needs.prepare.outputs.version }}
       build_number: ${{ needs.prepare.outputs.build }}
@@ -204,7 +202,7 @@ jobs:
       RESONANCE_WINDOWS_CERTIFICATE_SHA1: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_SHA1 }}
     with:
       release_candidate: true
-      production_signing: ${{ needs.prepare.outputs.unsigned_desktop != 'true' }}
+      production_signing: true
       version_override: true
       version: ${{ needs.prepare.outputs.version }}
       build_number: ${{ needs.prepare.outputs.build }}
@@ -246,7 +244,6 @@ jobs:
           merge-multiple: true
 
       - name: Download desktop signing evidence
-        if: ${{ needs.prepare.outputs.unsigned_desktop != 'true' }}
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           pattern: release-signing-*
@@ -254,18 +251,10 @@ jobs:
           merge-multiple: true
 
       - name: Validate production-signed asset set
-        if: ${{ needs.prepare.outputs.unsigned_desktop != 'true' }}
         run: >-
           node scripts/validate-release-assets.mjs
           candidate/assets "${{ needs.prepare.outputs.version }}"
           --signing-evidence candidate/signing
-
-      - name: Validate explicit unsigned desktop asset set
-        if: ${{ needs.prepare.outputs.unsigned_desktop == 'true' }}
-        run: >-
-          node scripts/validate-release-assets.mjs
-          candidate/assets "${{ needs.prepare.outputs.version }}"
-          --allow-unsigned-desktop-release
 
       - name: Write direct candidate provenance
         shell: bash

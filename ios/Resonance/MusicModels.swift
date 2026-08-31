@@ -523,6 +523,9 @@ enum MobileFullCatalogAuthorityPolicy {
 }
 
 enum MobileUnlinkedDownloadMigrationPolicy {
+    /// Retired compatibility marker for libraries written before source links were persisted.
+    /// Keep the historical identifier so rolling back cannot make an older build retry its
+    /// destructive implementation. The current migration only annotates legacy tracks.
     static let identifier = "delete-unlinked-downloads-v1"
 
     struct Decision: Equatable {
@@ -536,18 +539,31 @@ enum MobileUnlinkedDownloadMigrationPolicy {
             migrated.preservesUnlinkedImport = !legacyDownloadOwned
         }
 
-        let hasRemoteIdentity = [migrated.remoteID, migrated.sourceServer].contains { value in
-            value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-        }
-        let hasSourceLink = [migrated.sourceURL, migrated.downloadSourceURL].contains { value in
-            value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-        }
         return Decision(
             track: migrated,
-            shouldDelete: (hasRemoteIdentity || legacyDownloadOwned)
-                && !hasSourceLink
-                && migrated.preservesUnlinkedImport != true
+            // A legacy source-link omission is not evidence that either the file or its
+            // references can be discarded. Keep this field for callers/tests that inspect
+            // the old decision shape, but make the safe behavior explicit.
+            shouldDelete: false
         )
+    }
+
+    /// Migrates a legacy library without touching media or collection references.
+    /// `legacyDownloadOwned` only determines the compatibility annotation; it must never be
+    /// used as permission to remove a track or its file.
+    static func migrate(
+        _ library: MobileStoredLibrary,
+        legacyDownloadOwned: (MobileTrack) -> Bool
+    ) -> MobileStoredLibrary {
+        guard !(library.completedMigrations ?? []).contains(identifier) else { return library }
+        var migrated = library
+        migrated.tracks = library.tracks.map { track in
+            decision(for: track, legacyDownloadOwned: legacyDownloadOwned(track)).track
+        }
+        var migrations = library.completedMigrations ?? []
+        migrations.insert(identifier)
+        migrated.completedMigrations = migrations
+        return migrated
     }
 }
 

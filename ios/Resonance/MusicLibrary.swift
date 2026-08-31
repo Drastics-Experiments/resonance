@@ -7215,57 +7215,14 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         }
     }
 
-    private func migrateUnlinkedDownloads(
-        _ storedTracks: [MobileTrack]
-    ) -> (tracks: [MobileTrack], completed: Bool, changed: Bool) {
-        var retained: [MobileTrack] = []
-        var completed = true
-        var changed = false
-
-        for track in storedTracks {
+    private func migrateUnlinkedDownloads(_ stored: MobileStoredLibrary) -> MobileStoredLibrary {
+        MobileUnlinkedDownloadMigrationPolicy.migrate(stored) { [weak self] track in
+            guard let self else { return false }
             let mediaURL = fileURL(for: track)
-            let legacyDownloadOwned = (try? mediaURL.resourceValues(
+            return (try? mediaURL.resourceValues(
                 forKeys: [.isExcludedFromBackupKey]
             ).isExcludedFromBackup) == true
-            let decision = MobileUnlinkedDownloadMigrationPolicy.decision(
-                for: track,
-                legacyDownloadOwned: legacyDownloadOwned
-            )
-            changed = changed || decision.track != track
-            guard decision.shouldDelete else {
-                retained.append(decision.track)
-                continue
-            }
-
-            guard isDescendant(mediaURL, of: musicDirectory) else {
-                retained.append(decision.track)
-                completed = false
-                continue
-            }
-            do {
-                if fileManager.fileExists(atPath: mediaURL.path) {
-                    try fileManager.removeItem(at: mediaURL)
-                }
-                if let artworkFilename = decision.track.artworkFilename {
-                    let artworkURL = artworkDirectory.appendingPathComponent(artworkFilename)
-                    if isDescendant(artworkURL, of: artworkDirectory) {
-                        try? fileManager.removeItem(at: artworkURL)
-                        artworkCache.removeValue(forKey: artworkFilename)
-                    }
-                }
-                changed = true
-            } catch {
-                retained.append(decision.track)
-                completed = false
-            }
         }
-        return (retained, completed, changed)
-    }
-
-    private func isDescendant(_ candidate: URL, of directory: URL) -> Bool {
-        let rootPath = directory.standardizedFileURL.path
-        let candidatePath = candidate.standardizedFileURL.path
-        return candidatePath.hasPrefix(rootPath + "/")
     }
 
     private func load() {
@@ -7327,33 +7284,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             stored.remoteSongMetadataCache ?? [:]
         )
 
-        var didMigrateUnlinkedDownloads = false
-        if !(stored.completedMigrations ?? []).contains(MobileUnlinkedDownloadMigrationPolicy.identifier) {
-            let migration = migrateUnlinkedDownloads(stored.tracks)
-            stored.tracks = migration.tracks
-            let retainedIDs = Set(migration.tracks.map(\.id))
-            stored.playlists = stored.playlists.map { playlist in
-                var migrated = playlist
-                migrated.trackIDs.removeAll { !retainedIDs.contains($0) }
-                return migrated
-            }
-            stored.favorites.formIntersection(retainedIDs)
-            stored.profileStates = stored.profileStates?.mapValues { state in
-                var migrated = state
-                migrated.playlists = migrated.playlists.map { playlist in
-                    var playlist = playlist
-                    playlist.trackIDs.removeAll { !retainedIDs.contains($0) }
-                    return playlist
-                }
-                return migrated
-            }
-            if migration.completed {
-                var migrations = stored.completedMigrations ?? []
-                migrations.insert(MobileUnlinkedDownloadMigrationPolicy.identifier)
-                stored.completedMigrations = migrations
-            }
-            didMigrateUnlinkedDownloads = migration.changed || migration.completed
-        }
+        let migratedStored = migrateUnlinkedDownloads(stored)
+        let didMigrateUnlinkedDownloads = migratedStored != stored
+        stored = migratedStored
         completedMigrations = stored.completedMigrations ?? []
 
         var fallbackServerURL = URL(string: stored.serverURL)

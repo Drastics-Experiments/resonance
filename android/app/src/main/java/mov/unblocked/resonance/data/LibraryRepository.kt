@@ -132,62 +132,10 @@ class LibraryRepository(
     }
 
     private fun migrateUnlinkedDownloads(library: StoredLibrary): LibraryMigration {
-        if (UnlinkedDownloadMigrationPolicy.Identifier in library.completedMigrations) {
-            return LibraryMigration(library, changed = false)
+        val migrated = UnlinkedDownloadMigrationPolicy.migrate(library) { track ->
+            RepositoryFilePolicy.downloadID(track.relativePath) != null
         }
-
-        val retained = mutableListOf<Track>()
-        var completed = true
-        var changed = false
-        library.tracks.forEach { track ->
-            val legacyDownloadOwned = RepositoryFilePolicy.downloadID(track.relativePath) != null
-            val decision = UnlinkedDownloadMigrationPolicy.decision(track, legacyDownloadOwned)
-            changed = changed || decision.track != track
-            if (!decision.shouldDelete) {
-                retained += decision.track
-                return@forEach
-            }
-
-            val mediaFile = fileForTrack(decision.track)
-            if (!isDirectChild(mediaFile, musicDirectory)) {
-                retained += decision.track
-                completed = false
-                return@forEach
-            }
-            val deleted = !mediaFile.exists() || (mediaFile.isFile && mediaFile.delete())
-            if (!deleted) {
-                retained += decision.track
-                completed = false
-                return@forEach
-            }
-            artworkFile(decision.track)?.takeIf { isDirectChild(it, artworkDirectory) }?.delete()
-            changed = true
-        }
-
-        val retainedIDs = retained.mapTo(linkedSetOf(), Track::id)
-        val migrations = if (completed) {
-            changed = true
-            library.completedMigrations + UnlinkedDownloadMigrationPolicy.Identifier
-        } else {
-            library.completedMigrations
-        }
-        val migrated = library.copy(
-            tracks = retained,
-            playlists = library.playlists.map { playlist ->
-                playlist.copy(trackIDs = playlist.trackIDs.filter(retainedIDs::contains))
-            },
-            favorites = library.favorites.intersect(retainedIDs),
-            profileStates = library.profileStates.mapValues { (_, state) ->
-                state.copy(
-                    playlists = state.playlists.map { playlist ->
-                        playlist.copy(trackIDs = playlist.trackIDs.filter(retainedIDs::contains))
-                    },
-                    favorites = state.favorites.intersect(retainedIDs),
-                )
-            },
-            completedMigrations = migrations,
-        )
-        return LibraryMigration(migrated, changed)
+        return LibraryMigration(migrated, changed = migrated != library)
     }
 
     suspend fun importAudio(uri: Uri, preferredFilename: String? = null): Track =

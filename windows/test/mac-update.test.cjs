@@ -10,6 +10,7 @@ const {
   downloadMacUpdate,
   fetchMacUpdateManifest,
   isMacUpdateAvailable,
+  launchMacUpdateInstaller,
   normalizeMacUpdateManifest,
   updateArchiveFilename,
   validateMacUpdateArchive,
@@ -78,4 +79,29 @@ test("downloads, verifies, and validates the macOS archive", async (t) => {
 
   await fs.appendFile(downloaded.path, Buffer.from("tamper"));
   assert.equal(await validateMacUpdateArchive(downloaded.path, MANIFEST), false);
+});
+
+test("does not spawn a staged macOS installer after install authorization changes", async () => {
+  let authorized = true;
+  let spawned = false;
+  const result = await launchMacUpdateInstaller({
+    archivePath: "/tmp/Resonance-macOS.zip",
+    destinationPath: "/Applications/Resonance.app",
+    helperPath: "/app/install-update.sh",
+    version: "1.2.3-beta.1",
+    authorizeInstall: () => authorized,
+    fsImpl: {
+      async mkdtemp() { return "/tmp/resonance-update-test"; },
+      async copyFile() { authorized = false; },
+      async chmod() {},
+      async rm() {},
+    },
+    spawnImpl() {
+      spawned = true;
+      return { unref() {} };
+    },
+  });
+
+  assert.equal(result, false);
+  assert.equal(spawned, false);
 });

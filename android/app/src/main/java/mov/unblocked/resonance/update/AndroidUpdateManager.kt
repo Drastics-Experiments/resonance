@@ -49,14 +49,32 @@ class AndroidUpdateManager(
     private val preferences = appContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
     private val updateDirectory = File(appContext.cacheDir, "updates")
     private val mutableState = MutableStateFlow<AndroidUpdateState>(AndroidUpdateState.Idle)
+    private val mutableDeveloperMode = MutableStateFlow(
+        preferences.getBoolean(DEVELOPER_MODE_KEY, false),
+    )
+    @Volatile
+    private var operationGeneration = 0L
     val state = mutableState.asStateFlow()
+    val developerMode = mutableDeveloperMode.asStateFlow()
 
     suspend fun checkForUpdateOnStartup() {
         checkForUpdate(force = true)
     }
 
     suspend fun checkForUpdateIfDue() {
-        checkForUpdate(force = false)
+        checkForUpdate(force = mutableDeveloperMode.value)
+    }
+
+    /** Persist the update channel and invalidate any result fetched for the previous channel. */
+    fun setDeveloperMode(enabled: Boolean) {
+        if (mutableDeveloperMode.value == enabled) return
+        mutableDeveloperMode.value = enabled
+        preferences.edit()
+            .putBoolean(DEVELOPER_MODE_KEY, enabled)
+            .remove(LAST_CHECK_KEY)
+            .apply()
+        operationGeneration += 1L
+        mutableState.value = AndroidUpdateState.Idle
     }
 
     private suspend fun checkForUpdate(force: Boolean) {
@@ -64,36 +82,57 @@ class AndroidUpdateManager(
         val lastCheck = preferences.getLong(LAST_CHECK_KEY, 0L)
         if (!AndroidUpdateCheckPolicy.shouldCheck(lastCheck, System.currentTimeMillis(), force)) return
 
+        val generation = operationGeneration
+        val checkingDeveloperMode = mutableDeveloperMode.value
         mutableState.value = AndroidUpdateState.Checking
         runCatching {
-            val rawManifest = withContext(Dispatchers.IO) { fetchText(manifestUrl) }
+            val rawManifest = withContext(Dispatchers.IO) {
+                fetchUpdateManifest(checkingDeveloperMode)
+            }
             AndroidUpdatePolicy.availableUpdate(
                 rawManifest = rawManifest,
                 currentVersionCode = BuildConfig.VERSION_CODE.toLong(),
                 allowInsecureDownloadUrl = BuildConfig.DEBUG && isEmulatorTestUrl(manifestUrl),
             )
         }.onSuccess { update ->
+            if (generation != operationGeneration || checkingDeveloperMode != mutableDeveloperMode.value) return@onSuccess
             preferences.edit { putLong(LAST_CHECK_KEY, System.currentTimeMillis()) }
             mutableState.value = update?.let(AndroidUpdateState::Available) ?: AndroidUpdateState.Idle
         }.onFailure {
+            if (generation != operationGeneration || checkingDeveloperMode != mutableDeveloperMode.value) return@onFailure
             // Automatic checks stay quiet when the device is offline or no release manifest exists yet.
             mutableState.value = AndroidUpdateState.Idle
         }
     }
 
+    private fun fetchUpdateManifest(developerMode: Boolean): String {
+        if (!developerMode) return fetchText(manifestUrl)
+
+        val releases = fetchText(
+            PRERELEASES_API_URL,
+            maximumBytes = MAX_RELEASE_LIST_BYTES,
+        )
+        val prereleaseManifestURL = AndroidUpdatePolicy.prereleaseManifestURL(releases)
+        return fetchText(prereleaseManifestURL)
+    }
+
     suspend fun downloadUpdate(update: AndroidUpdateInfo): File? {
         if (mutableState.value is AndroidUpdateState.Downloading) return null
+        val generation = operationGeneration
         mutableState.value = AndroidUpdateState.Downloading(update, null)
-        return runCatching {
-            withContext(Dispatchers.IO) { downloadAndVerify(update) }
-        }.onSuccess {
+        val result = runCatching {
+            withContext(Dispatchers.IO) { downloadAndVerify(update, generation) }
+        }
+        if (generation != operationGeneration) return null
+        result.onSuccess {
             mutableState.value = AndroidUpdateState.ReadyToInstall(update)
         }.onFailure { error ->
             mutableState.value = AndroidUpdateState.Failed(
                 message = error.message?.takeIf(String::isNotBlank) ?: "The update could not be downloaded.",
                 update = update,
             )
-        }.getOrNull()
+        }
+        return result.getOrNull()
     }
 
     fun downloadedFile(update: AndroidUpdateInfo): File? =
@@ -146,7 +185,7 @@ class AndroidUpdateManager(
         )
     }
 
-    private fun fetchText(url: String): String {
+    private fun fetchText(url: String, maximumBytes: Long = MAX_MANIFEST_BYTES): String {
         val connection = openFollowingRedirects(
             url,
             allowLocalDevelopment = BuildConfig.DEBUG && isEmulatorTestUrl(url),
@@ -155,8 +194,8 @@ class AndroidUpdateManager(
             val responseCode = connection.responseCode
             if (responseCode !in 200..299) throw IOException("Update check returned HTTP $responseCode.")
             val length = connection.contentLengthLong
-            if (length > MAX_MANIFEST_BYTES) throw IOException("The update manifest is too large.")
-            val bytes = connection.inputStream.use { input -> readBoundedBytes(input, MAX_MANIFEST_BYTES) }
+            if (length > maximumBytes) throw IOException("The update response is too large.")
+            val bytes = connection.inputStream.use { input -> readBoundedBytes(input, maximumBytes) }
             String(bytes, Charsets.UTF_8)
         } finally {
             connection.disconnect()
@@ -177,7 +216,7 @@ class AndroidUpdateManager(
         return output.toByteArray()
     }
 
-    private fun downloadAndVerify(update: AndroidUpdateInfo): File {
+    private fun downloadAndVerify(update: AndroidUpdateInfo, generation: Long): File {
         updateDirectory.mkdirs()
         val target = File(updateDirectory, apkFilename(update))
         val partial = File(updateDirectory, "${apkFilename(update)}.part")
@@ -204,6 +243,9 @@ class AndroidUpdateManager(
                 FileOutputStream(partial).use { output ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                     while (true) {
+                        if (generation != operationGeneration) {
+                            throw IOException("The update channel changed.")
+                        }
                         val count = input.read(buffer)
                         if (count < 0) break
                         downloadedBytes += count
@@ -340,11 +382,15 @@ class AndroidUpdateManager(
     companion object {
         const val DEFAULT_MANIFEST_URL =
             "https://github.com/Drastics-Experiments/resonance/releases/latest/download/latest-android.json"
+        const val PRERELEASES_API_URL =
+            "https://api.github.com/repos/Drastics-Experiments/resonance/releases?per_page=30"
         private const val PREFERENCES_NAME = "resonance.android-updater"
         private const val LAST_CHECK_KEY = "last-successful-check-ms"
+        private const val DEVELOPER_MODE_KEY = "developer-mode"
         private const val CONNECT_TIMEOUT_MS = 15_000
         private const val READ_TIMEOUT_MS = 30_000
         private const val MAX_MANIFEST_BYTES = 128 * 1024L
+        private const val MAX_RELEASE_LIST_BYTES = 2 * 1024 * 1024L
         private const val MAX_APK_BYTES = 1024 * 1024 * 1024L
         private const val MAX_REDIRECTS = 5
         private const val APK_MIME_TYPE = "application/vnd.android.package-archive"

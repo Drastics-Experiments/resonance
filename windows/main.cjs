@@ -86,10 +86,17 @@ const {
   publicListenAlongEvent,
 } = require("./listen-along.cjs");
 const { catalogSHA256, normalizeServerBaseURL } = require("./server-policy.cjs");
-const { conciseUpdaterError, installDownloadedWindowsUpdate, resolveWindowsUpdateFeed } = require("./updater-feed.cjs");
+const {
+  conciseUpdaterError,
+  fetchWindowsUpdateVersion,
+  installDownloadedWindowsUpdate,
+  resolveMacUpdateManifest,
+  resolveWindowsUpdateFeed,
+} = require("./updater-feed.cjs");
 const {
   MAC_UPDATE_MANIFEST_URL,
   downloadMacUpdate,
+  compareMacVersions,
   fetchMacUpdateManifest,
   isMacUpdateAvailable,
   launchMacUpdateInstaller,
@@ -99,6 +106,7 @@ const {
 const {
   verifyDownloadedWindowsUpdate,
 } = require("./updater-auth.cjs");
+const { createUpdateChannelGeneration } = require("./update-channel.cjs");
 const { LocalImportError, isSpotifyURL, searchYouTubeAudioSources, youtubeVideoID } = require("./local-import-core.cjs");
 const { importFileBackedSource, searchFileBackedSources } = require("./local-debrid.cjs");
 const {
@@ -238,7 +246,13 @@ let applicationQuitRequested = false;
 let backgroundTray = null;
 const DEFAULT_APP_THEME = "midnight";
 const APP_THEME_IDS = new Set([DEFAULT_APP_THEME, "ocean", "forest", "sunset"]);
-let runtimeAppPreferences = { theme: DEFAULT_APP_THEME, runInBackground: false, discordRichPresence: false };
+let runtimeAppPreferences = {
+  theme: DEFAULT_APP_THEME,
+  runInBackground: false,
+  discordRichPresence: false,
+  developerMode: false,
+};
+let runtimeAppPreferencesLoaded = false;
 let currentDiscordPresenceStatus = { state: "disabled", message: "Rich Presence is off.", applicationConfigured: false };
 const activeServerTransfers = new Map();
 let serverTransferGeneration = 0;
@@ -276,13 +290,20 @@ const rendererCredentialFingerprints = new Map();
 const rendererCredentialEpochs = new Map();
 const credentialFingerprintKey = randomBytes(32);
 let currentWindowsUpdateStatus = { type: "idle" };
+const desktopUpdateChannel = createUpdateChannelGeneration();
 let windowsUpdateCheckPromise = null;
+let windowsUpdateCheckGeneration = null;
 let verifiedWindowsUpdate = null;
 let windowsUpdateVerificationPromise = null;
+let activeWindowsUpdateGeneration = null;
+let windowsUpdateCancellation = null;
 let macUpdateCheckPromise = null;
+let macUpdateCheckGeneration = null;
 let macUpdateDownloadPromise = null;
+let macUpdateDownloadGeneration = null;
 let macUpdateManifest = null;
 let macUpdateArchivePath = null;
+let macUpdateArtifactGeneration = null;
 let automaticUpdateCheckTimer = null;
 let automaticUpdateCheckInterval = null;
 let macNativeMigrationPromise = null;
@@ -865,69 +886,142 @@ autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = false;
 
 function desktopUpdatesSupported() {
-  return app.isPackaged && (process.platform === "win32" || process.platform === "darwin");
+  return (app.isPackaged || runtimeAppPreferences.developerMode)
+    && (process.platform === "win32" || process.platform === "darwin");
 }
 
 function publishUpdateStatus(type, details = {}) {
   const previousVersion = currentWindowsUpdateStatus.version;
   currentWindowsUpdateStatus = {
     type,
+    channel: runtimeAppPreferences.developerMode ? "prerelease" : "stable",
     ...(type !== "current" && (details.version || previousVersion) ? { version: details.version || previousVersion } : {}),
     ...details,
   };
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("update:status", currentWindowsUpdateStatus);
 }
 
-autoUpdater.on("checking-for-update", () => publishUpdateStatus("checking"));
-autoUpdater.on("update-available", (information) => {
-  verifiedWindowsUpdate = null;
-  publishUpdateStatus("available", { version: information.version });
+function publishUpdateStatusForGeneration(generation, type, details = {}) {
+  if (!desktopUpdateChannel.isCurrent(generation)) return false;
+  publishUpdateStatus(type, details);
+  return true;
+}
+
+autoUpdater.on("checking-for-update", () => {
+  publishUpdateStatusForGeneration(activeWindowsUpdateGeneration, "checking");
 });
-autoUpdater.on("update-not-available", () => publishUpdateStatus("current"));
-autoUpdater.on("download-progress", (progress) => publishUpdateStatus("downloading", { percent: Math.round(progress.percent || 0) }));
+autoUpdater.on("update-available", (information) => {
+  if (!desktopUpdateChannel.isCurrent(activeWindowsUpdateGeneration)) return;
+  verifiedWindowsUpdate = null;
+  publishUpdateStatusForGeneration(activeWindowsUpdateGeneration, "available", { version: information.version });
+});
+autoUpdater.on("update-not-available", () => {
+  publishUpdateStatusForGeneration(activeWindowsUpdateGeneration, "current");
+});
+autoUpdater.on("download-progress", (progress) => {
+  publishUpdateStatusForGeneration(activeWindowsUpdateGeneration, "downloading", {
+    percent: Math.round(progress.percent || 0),
+  });
+});
 autoUpdater.on("update-downloaded", (information) => {
   // electron-updater is retained for the Windows NSIS channel only.  macOS
   // uses latest-mac.json and its signed zip/helper contract below.
   if (process.platform !== "win32") return;
-  windowsUpdateVerificationPromise = (async () => {
+  const generation = activeWindowsUpdateGeneration;
+  if (!desktopUpdateChannel.isCurrent(generation)) return;
+  const verificationPromise = (async () => {
     const verification = await verifyDownloadedWindowsUpdate({
       downloadedFile: information?.downloadedFile,
       currentExecutable: process.execPath,
       authenticityMode: desktopPackage.resonanceUpdateAuthenticity,
       packaged: app.isPackaged,
     });
+    if (!desktopUpdateChannel.isCurrent(generation)) return null;
     verifiedWindowsUpdate = Object.freeze({
+      generation,
       version: String(information?.version || ""),
       downloadedFile: String(information?.downloadedFile || ""),
       verification,
     });
-    publishUpdateStatus("ready", { version: information.version });
+    publishUpdateStatusForGeneration(generation, "ready", { version: information.version });
     return verifiedWindowsUpdate;
   })();
-  windowsUpdateVerificationPromise.catch((error) => {
+  windowsUpdateVerificationPromise = verificationPromise;
+  verificationPromise.catch((error) => {
+    if (!desktopUpdateChannel.isCurrent(generation)) return;
     verifiedWindowsUpdate = null;
-    publishUpdateStatus("error", { message: conciseUpdaterError(error) });
+    publishUpdateStatusForGeneration(generation, "error", { message: conciseUpdaterError(error) });
   }).finally(() => {
-    windowsUpdateVerificationPromise = null;
+    if (windowsUpdateVerificationPromise === verificationPromise) windowsUpdateVerificationPromise = null;
   });
 });
 autoUpdater.on("error", (error) => {
+  if (!desktopUpdateChannel.isCurrent(activeWindowsUpdateGeneration)) return;
   verifiedWindowsUpdate = null;
-  publishUpdateStatus("error", { message: conciseUpdaterError(error) });
+  publishUpdateStatusForGeneration(activeWindowsUpdateGeneration, "error", { message: conciseUpdaterError(error) });
 });
 
 async function checkForWindowsUpdates() {
-  if (process.platform !== "win32" || !app.isPackaged) return null;
-  if (windowsUpdateCheckPromise) return windowsUpdateCheckPromise;
-  windowsUpdateCheckPromise = (async () => {
-    const { feedURL } = await resolveWindowsUpdateFeed();
+  if (process.platform !== "win32" || (!app.isPackaged && !runtimeAppPreferences.developerMode)) return null;
+  const generation = desktopUpdateChannel.capture();
+  if (windowsUpdateCheckPromise) {
+    if (windowsUpdateCheckGeneration === generation) return windowsUpdateCheckPromise;
+    await windowsUpdateCheckPromise.catch(() => null);
+    if (!desktopUpdateChannel.isCurrent(generation)) return null;
+    return checkForWindowsUpdates();
+  }
+  const operationPromise = (async () => {
+    const developerMode = runtimeAppPreferences.developerMode;
+    const { feedURL } = await resolveWindowsUpdateFeed(fetch, {
+      prerelease: developerMode,
+    });
+    if (!desktopUpdateChannel.isCurrent(generation)) return null;
+    if (!app.isPackaged) {
+      const candidateVersion = await fetchWindowsUpdateVersion(new URL("latest.yml", feedURL), fetch);
+      if (!desktopUpdateChannel.isCurrent(generation)) return null;
+      const available = compareMacVersions(candidateVersion, app.getVersion()) === 1;
+      publishUpdateStatusForGeneration(generation, available ? "available" : "current", available
+        ? { version: candidateVersion, scanOnly: true }
+        : { scanOnly: true });
+      return null;
+    }
+    activeWindowsUpdateGeneration = generation;
+    autoUpdater.allowPrerelease = developerMode;
+    autoUpdater.allowDowngrade = false;
     autoUpdater.setFeedURL({ provider: "generic", url: feedURL });
-    return autoUpdater.checkForUpdates();
+    const result = await autoUpdater.checkForUpdates();
+    const cancellation = result?.cancellationToken
+      ? Object.freeze({ generation, token: result.cancellationToken })
+      : null;
+    windowsUpdateCancellation = cancellation;
+    if (!desktopUpdateChannel.isCurrent(generation)) cancellation?.token?.cancel();
+    let operationError = null;
+    try {
+      if (result?.downloadPromise) await result.downloadPromise;
+    } catch (error) {
+      operationError = error;
+    }
+    const verificationPromise = windowsUpdateVerificationPromise;
+    try {
+      if (verificationPromise) await verificationPromise;
+    } catch (error) {
+      operationError ||= error;
+    }
+    if (!desktopUpdateChannel.isCurrent(generation)) return null;
+    if (operationError) throw operationError;
+    return result;
   })();
+  windowsUpdateCheckPromise = operationPromise;
+  windowsUpdateCheckGeneration = generation;
   try {
-    return await windowsUpdateCheckPromise;
+    return await operationPromise;
   } finally {
-    windowsUpdateCheckPromise = null;
+    if (windowsUpdateCheckPromise === operationPromise) {
+      windowsUpdateCheckPromise = null;
+      windowsUpdateCheckGeneration = null;
+    }
+    if (activeWindowsUpdateGeneration === generation) activeWindowsUpdateGeneration = null;
+    if (windowsUpdateCancellation?.generation === generation) windowsUpdateCancellation = null;
   }
 }
 
@@ -935,9 +1029,12 @@ function macUpdateDirectory() {
   return path.join(app.getPath("userData"), "Updates");
 }
 
-function macUpdateManifestURL() {
-  const requested = String(process.env.RESONANCE_MAC_UPDATE_MANIFEST_URL || MAC_UPDATE_MANIFEST_URL).trim();
-  return requested || MAC_UPDATE_MANIFEST_URL;
+async function macUpdateManifestURL(developerMode) {
+  const requested = String(process.env.RESONANCE_MAC_UPDATE_MANIFEST_URL || "").trim();
+  if (requested) return requested;
+  if (!developerMode) return MAC_UPDATE_MANIFEST_URL;
+  const { manifestURL } = await resolveMacUpdateManifest(fetch, { prerelease: true });
+  return manifestURL;
 }
 
 function macApplicationBundlePath() {
@@ -970,37 +1067,60 @@ async function cachedMacUpdateArchive(manifest) {
   return await validateMacUpdateArchive(archivePath, manifest) ? archivePath : null;
 }
 
-async function downloadMacUpdateArchive(manifest) {
-  if (macUpdateDownloadPromise) return macUpdateDownloadPromise;
-  macUpdateDownloadPromise = (async () => {
-    publishUpdateStatus("downloading", { version: manifest.version, percent: 0 });
+async function downloadMacUpdateArchive(manifest, generation) {
+  if (!desktopUpdateChannel.isCurrent(generation)) return null;
+  if (macUpdateDownloadPromise) {
+    if (macUpdateDownloadGeneration === generation) return macUpdateDownloadPromise;
+    await macUpdateDownloadPromise.catch(() => null);
+    if (!desktopUpdateChannel.isCurrent(generation)) return null;
+    return downloadMacUpdateArchive(manifest, generation);
+  }
+  const downloadPromise = (async () => {
+    publishUpdateStatusForGeneration(generation, "downloading", { version: manifest.version, percent: 0 });
     const downloaded = await downloadMacUpdate({
       manifest,
       destinationDirectory: macUpdateDirectory(),
       onProgress(progress) {
-        publishUpdateStatus("downloading", {
+        publishUpdateStatusForGeneration(generation, "downloading", {
           version: manifest.version,
           ...(Number.isFinite(progress.percent) ? { percent: progress.percent } : {}),
         });
       },
     });
+    if (!desktopUpdateChannel.isCurrent(generation)) return null;
     macUpdateArchivePath = downloaded.path;
-    publishUpdateStatus("ready", { version: manifest.version });
+    macUpdateArtifactGeneration = generation;
+    publishUpdateStatusForGeneration(generation, "ready", { version: manifest.version });
     return downloaded.path;
   })();
+  macUpdateDownloadPromise = downloadPromise;
+  macUpdateDownloadGeneration = generation;
   try {
-    return await macUpdateDownloadPromise;
+    return await downloadPromise;
   } finally {
-    macUpdateDownloadPromise = null;
+    if (macUpdateDownloadPromise === downloadPromise) {
+      macUpdateDownloadPromise = null;
+      macUpdateDownloadGeneration = null;
+    }
   }
 }
 
 async function checkForMacUpdates() {
-  if (process.platform !== "darwin" || !app.isPackaged) return null;
-  if (macUpdateCheckPromise) return macUpdateCheckPromise;
-  macUpdateCheckPromise = (async () => {
-    publishUpdateStatus("checking");
-    const manifest = await fetchMacUpdateManifest({ manifestURL: macUpdateManifestURL() });
+  if (process.platform !== "darwin" || (!app.isPackaged && !runtimeAppPreferences.developerMode)) return null;
+  const generation = desktopUpdateChannel.capture();
+  if (macUpdateCheckPromise) {
+    if (macUpdateCheckGeneration === generation) return macUpdateCheckPromise;
+    await macUpdateCheckPromise.catch(() => null);
+    if (!desktopUpdateChannel.isCurrent(generation)) return null;
+    return checkForMacUpdates();
+  }
+  const operationPromise = (async () => {
+    const developerMode = runtimeAppPreferences.developerMode;
+    publishUpdateStatusForGeneration(generation, "checking");
+    const manifestURL = await macUpdateManifestURL(developerMode);
+    if (!desktopUpdateChannel.isCurrent(generation)) return null;
+    const manifest = await fetchMacUpdateManifest({ manifestURL });
+    if (!desktopUpdateChannel.isCurrent(generation)) return null;
     const currentBuild = Number(desktopPackage.resonanceBuild);
     const available = isMacUpdateAvailable({
       currentVersion: app.getVersion(),
@@ -1011,24 +1131,41 @@ async function checkForMacUpdates() {
     if (!available) {
       macUpdateManifest = null;
       macUpdateArchivePath = null;
-      publishUpdateStatus("current");
+      macUpdateArtifactGeneration = null;
+      publishUpdateStatusForGeneration(generation, "current");
+      return null;
+    }
+    if (!app.isPackaged) {
+      macUpdateManifest = null;
+      macUpdateArchivePath = null;
+      macUpdateArtifactGeneration = null;
+      publishUpdateStatusForGeneration(generation, "available", { version: manifest.version, scanOnly: true });
       return null;
     }
     macUpdateManifest = manifest;
-    macUpdateArchivePath = await cachedMacUpdateArchive(manifest);
-    if (macUpdateArchivePath) {
-      publishUpdateStatus("ready", { version: manifest.version });
-      return macUpdateArchivePath;
+    const cachedArchivePath = await cachedMacUpdateArchive(manifest);
+    if (!desktopUpdateChannel.isCurrent(generation)) return null;
+    macUpdateArchivePath = cachedArchivePath;
+    if (cachedArchivePath) {
+      macUpdateArtifactGeneration = generation;
+      publishUpdateStatusForGeneration(generation, "ready", { version: manifest.version });
+      return cachedArchivePath;
     }
-    return await downloadMacUpdateArchive(manifest);
+    macUpdateArtifactGeneration = null;
+    return await downloadMacUpdateArchive(manifest, generation);
   })();
+  macUpdateCheckPromise = operationPromise;
+  macUpdateCheckGeneration = generation;
   try {
-    return await macUpdateCheckPromise;
+    return await operationPromise;
   } catch (error) {
-    publishUpdateStatus("error", { message: String(error?.message || error) });
+    publishUpdateStatusForGeneration(generation, "error", { message: String(error?.message || error) });
     throw error;
   } finally {
-    macUpdateCheckPromise = null;
+    if (macUpdateCheckPromise === operationPromise) {
+      macUpdateCheckPromise = null;
+      macUpdateCheckGeneration = null;
+    }
   }
 }
 
@@ -1037,17 +1174,29 @@ async function checkForDesktopUpdates() {
 }
 
 async function installMacUpdate() {
-  if (process.platform !== "darwin" || !app.isPackaged || !macUpdateManifest || !macUpdateArchivePath) return false;
+  const generation = desktopUpdateChannel.capture();
+  if (process.platform !== "darwin"
+    || !app.isPackaged
+    || macUpdateArtifactGeneration !== generation
+    || !macUpdateManifest
+    || !macUpdateArchivePath) return false;
+  const manifest = macUpdateManifest;
   const archivePath = macUpdateArchivePath;
-  if (!await validateMacUpdateArchive(archivePath, macUpdateManifest)) {
-    macUpdateArchivePath = null;
-    publishUpdateStatus("error", { version: macUpdateManifest.version, message: "The downloaded macOS update is no longer valid." });
+  if (!await validateMacUpdateArchive(archivePath, manifest)) {
+    if (!desktopUpdateChannel.isCurrent(generation)) return false;
+    if (macUpdateArchivePath === archivePath) macUpdateArchivePath = null;
+    macUpdateArtifactGeneration = null;
+    publishUpdateStatusForGeneration(generation, "error", { version: manifest.version, message: "The downloaded macOS update is no longer valid." });
     return false;
   }
+  if (!desktopUpdateChannel.isCurrent(generation)
+    || macUpdateArtifactGeneration !== generation
+    || macUpdateManifest !== manifest
+    || macUpdateArchivePath !== archivePath) return false;
   const destinationPath = macApplicationBundlePath();
   const helperPath = bundledMacUpdateHelperPath();
   if (!destinationPath || !helperPath) {
-    publishUpdateStatus("error", { version: macUpdateManifest.version, message: "The macOS update installer is missing from this build." });
+    publishUpdateStatusForGeneration(generation, "error", { version: manifest.version, message: "The macOS update installer is missing from this build." });
     return false;
   }
   const started = await launchMacUpdateInstaller({
@@ -1055,10 +1204,14 @@ async function installMacUpdate() {
     destinationPath,
     helperPath,
     processID: process.pid,
-    version: macUpdateManifest.version,
+    version: manifest.version,
+    authorizeInstall: () => desktopUpdateChannel.isCurrent(generation)
+      && macUpdateArtifactGeneration === generation
+      && macUpdateManifest === manifest
+      && macUpdateArchivePath === archivePath,
   });
   if (!started) {
-    publishUpdateStatus("error", { version: macUpdateManifest.version, message: "The macOS update installer could not be started." });
+    publishUpdateStatusForGeneration(generation, "error", { version: manifest.version, message: "The macOS update installer could not be started." });
     return false;
   }
   applicationQuitRequested = true;
@@ -1067,8 +1220,11 @@ async function installMacUpdate() {
 }
 
 function runAutomaticUpdateCheck() {
-  if (!desktopUpdatesSupported() || ["available", "downloading", "ready"].includes(currentWindowsUpdateStatus.type)) return;
-  void checkForDesktopUpdates().catch((error) => publishUpdateStatus("error", {
+  const activeUpdate = ["available", "downloading", "ready"].includes(currentWindowsUpdateStatus.type)
+    && !currentWindowsUpdateStatus.scanOnly;
+  if (!desktopUpdatesSupported() || activeUpdate) return;
+  const generation = desktopUpdateChannel.capture();
+  void checkForDesktopUpdates().catch((error) => publishUpdateStatusForGeneration(generation, "error", {
     message: process.platform === "win32" ? conciseUpdaterError(error) : String(error?.message || error),
   }));
 }
@@ -1082,6 +1238,16 @@ function startAutomaticUpdateChecks() {
     automaticUpdateCheckInterval.unref?.();
   }, AUTOMATIC_UPDATE_CHECK_DELAY_MS);
   automaticUpdateCheckTimer.unref?.();
+}
+
+function resetDesktopUpdateStateForChannelChange() {
+  desktopUpdateChannel.invalidate();
+  windowsUpdateCancellation?.token?.cancel();
+  verifiedWindowsUpdate = null;
+  macUpdateManifest = null;
+  macUpdateArchivePath = null;
+  macUpdateArtifactGeneration = null;
+  publishUpdateStatus("idle");
 }
 
 function applicationPaths() {
@@ -1497,17 +1663,6 @@ function isDirectServerCacheFile(filePath) {
   const remote = path.resolve(applicationPaths().remote);
   const candidate = path.resolve(filePath);
   return candidate !== remote && path.dirname(candidate) === remote;
-}
-
-async function deleteManagedServerCacheFile(track) {
-  if (!track?.filePath) return true;
-  if (!isDirectServerCacheFile(track.filePath)) return false;
-  try {
-    await fs.rm(path.resolve(track.filePath), { force: true });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function safeListeningHistoryArtworkURL(candidate, serverOrigin) {
@@ -2406,6 +2561,7 @@ function safeAppPreferences(value) {
       : DEFAULT_APP_THEME,
     runInBackground: Boolean(preferences.runInBackground),
     discordRichPresence: Boolean(preferences.discordRichPresence),
+    developerMode: Boolean(preferences.developerMode),
     crossfadeEnabled: Boolean(preferences.crossfadeEnabled),
     crossfadeSeconds: Number.isFinite(requestedCrossfadeSeconds)
       ? Math.max(1, Math.min(12, Math.round(requestedCrossfadeSeconds)))
@@ -2486,7 +2642,13 @@ function ensureBackgroundTray() {
 }
 
 ipcMain.handle("app:preferences:update", (_event, value) => {
+  const previousDeveloperMode = runtimeAppPreferences.developerMode;
   runtimeAppPreferences = safeAppPreferences(value);
+  if (runtimeAppPreferencesLoaded && previousDeveloperMode !== runtimeAppPreferences.developerMode) {
+    resetDesktopUpdateStateForChannelChange();
+  }
+  runtimeAppPreferencesLoaded = true;
+  startAutomaticUpdateChecks();
   if (runtimeAppPreferences.runInBackground) ensureBackgroundTray();
   else if (backgroundTray) {
     backgroundTray.destroy();
@@ -2564,7 +2726,6 @@ app.whenReady().then(async () => {
   await ensureDirectories();
   protocol.handle(SERVER_STREAM_SCHEME, handleServerStreamRequest);
   createWindow();
-  startAutomaticUpdateChecks();
   const startupCallback = authCallbackFromArguments(process.argv);
   if (startupCallback) dispatchAccountAuthCallback(startupCallback);
   drainAccountAuthCallbacks();
@@ -2596,7 +2757,7 @@ app.on("before-quit", () => {
 ipcMain.handle("update:check", async () => {
   if (!desktopUpdatesSupported()) return { supported: false };
   await checkForDesktopUpdates();
-  return { supported: true };
+  return { supported: true, status: currentWindowsUpdateStatus };
 });
 
 ipcMain.handle("update:state", () => currentWindowsUpdateStatus);
@@ -2604,7 +2765,9 @@ ipcMain.handle("update:state", () => currentWindowsUpdateStatus);
 ipcMain.handle("update:install", async () => {
   if (!desktopUpdatesSupported()) return false;
   if (process.platform === "darwin") return installMacUpdate();
-  if (!verifiedWindowsUpdate || windowsUpdateVerificationPromise) return false;
+  if (!verifiedWindowsUpdate
+    || verifiedWindowsUpdate.generation !== desktopUpdateChannel.capture()
+    || windowsUpdateVerificationPromise) return false;
   // The assisted NSIS UI is useful for a first install, but an update already
   // knows the existing install directory. Apply it silently and relaunch the
   // app so upgrading never sends the user back through setup.
@@ -2643,7 +2806,6 @@ ipcMain.handle("library:load", async () => {
     let stored = JSON.parse(await fs.readFile(state, "utf8"));
     const migration = await migrateUnlinkedDownloads(stored, {
       legacyDownloadOwned: (track) => isDirectServerCacheFile(track?.filePath),
-      deleteManagedDownload: deleteManagedServerCacheFile,
     });
     stored = migration.state;
     const storedTracks = Array.isArray(stored.tracks) ? stored.tracks.filter(persistableLibraryTrack) : [];

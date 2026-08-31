@@ -43,6 +43,8 @@ fun ResonanceApp(
     state: ResonanceUiState,
     actions: ResonanceActions,
     updateState: AndroidUpdateState = AndroidUpdateState.Idle,
+    developerMode: Boolean = false,
+    onDeveloperModeChanged: (Boolean) -> Unit = {},
     onDownloadUpdate: (AndroidUpdateInfo) -> Unit = {},
     onInstallUpdate: (AndroidUpdateInfo) -> Unit = {},
     onDismissUpdate: () -> Unit = {},
@@ -154,7 +156,13 @@ fun ResonanceApp(
                 NowPlayingScreen(state, actions, onDismiss = { showNowPlaying = false })
             }
             if (showSettings) {
-                SettingsScreen(state, actions, onDismiss = { showSettings = false })
+                SettingsScreen(
+                    state = state,
+                    actions = actions,
+                    onDismiss = { showSettings = false },
+                    developerMode = developerMode,
+                    onDeveloperModeChanged = onDeveloperModeChanged,
+                )
             }
             val errorMessage = state.errorMessage
             if (errorMessage != null) {
@@ -167,6 +175,7 @@ fun ResonanceApp(
             } else {
                 AndroidUpdateDialog(
                     state = updateState,
+                    developerMode = developerMode,
                     onDownload = onDownloadUpdate,
                     onInstall = onInstallUpdate,
                     onDismiss = onDismissUpdate,
@@ -184,6 +193,7 @@ internal fun shouldShowTransferPopup(state: ResonanceUiState): Boolean =
 @Composable
 private fun AndroidUpdateDialog(
     state: AndroidUpdateState,
+    developerMode: Boolean,
     onDownload: (AndroidUpdateInfo) -> Unit,
     onInstall: (AndroidUpdateInfo) -> Unit,
     onDismiss: () -> Unit,
@@ -193,10 +203,18 @@ private fun AndroidUpdateDialog(
 
         is AndroidUpdateState.Available -> AlertDialog(
             onDismissRequest = onDismiss,
-            title = { Text("Update available") },
+            title = {
+                Text(if (developerMode) "Prerelease update available" else "Update available")
+            },
             text = {
                 Column {
-                    Text("Resonance ${state.update.versionName} is ready to download.")
+                    Text(
+                        if (developerMode) {
+                            "Resonance ${state.update.versionName} prerelease is ready to download."
+                        } else {
+                            "Resonance ${state.update.versionName} is ready to download."
+                        },
+                    )
                     state.update.releaseNotes?.let { notes ->
                         Text(notes, modifier = Modifier.padding(top = 12.dp))
                     }

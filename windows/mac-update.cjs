@@ -3,8 +3,8 @@ const { spawn } = require("node:child_process");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 
-// The macOS app predates the Electron client and intentionally does not use
-// electron-updater.  Its release contract is a small manifest plus a signed
+// The macOS updater intentionally does not use electron-updater. Its release
+// contract is a small manifest plus a signed
 // zip archive installed by the bundled `install-update.sh` helper.  Keep this
 // module free of Electron dependencies so the validation and redirect gates
 // can be exercised from Node tests on every host.
@@ -327,6 +327,7 @@ async function launchMacUpdateInstaller({
   spawnImpl = spawn,
   fsImpl = fs,
   environment = process.env,
+  authorizeInstall = () => true,
 } = {}) {
   const normalized = normalizedVersion(version);
   if (!normalized || !archivePath || !destinationPath || !helperPath) return false;
@@ -334,8 +335,11 @@ async function launchMacUpdateInstaller({
   try {
     const directory = await fsImpl.mkdtemp(path.join(require("node:os").tmpdir(), "resonance-update-"));
     helper = path.join(directory, "install-update.sh");
+    if (!authorizeInstall()) throw new Error("The macOS update channel changed.");
     await fsImpl.copyFile(helperPath, helper);
+    if (!authorizeInstall()) throw new Error("The macOS update channel changed.");
     await fsImpl.chmod(helper, 0o700);
+    if (!authorizeInstall()) throw new Error("The macOS update channel changed.");
     const child = spawnImpl("/bin/bash", [helper, archivePath, destinationPath, String(processID), normalized], {
       detached: true,
       stdio: "ignore",

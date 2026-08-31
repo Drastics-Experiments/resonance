@@ -1,6 +1,7 @@
 package mov.unblocked.resonance.update
 
 import java.net.URL
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import mov.unblocked.resonance.data.RemoteURLPolicy
@@ -41,8 +42,24 @@ data class AndroidUpdateInfo(
     val releaseNotes: String?,
 )
 
+@Serializable
+private data class GitHubAndroidRelease(
+    val draft: Boolean = false,
+    val prerelease: Boolean = false,
+    @SerialName("published_at") val publishedAt: String? = null,
+    @SerialName("created_at") val createdAt: String? = null,
+    val assets: List<GitHubAndroidReleaseAsset> = emptyList(),
+)
+
+@Serializable
+private data class GitHubAndroidReleaseAsset(
+    val name: String? = null,
+    @SerialName("browser_download_url") val browserDownloadURL: String? = null,
+)
+
 internal object AndroidUpdateNetworkPolicy {
     private val approvedHosts = setOf(
+        "api.github.com",
         "github.com",
         "www.github.com",
         "objects.githubusercontent.com",
@@ -72,6 +89,33 @@ internal object AndroidUpdateNetworkPolicy {
 internal object AndroidUpdatePolicy {
     private val json = Json { ignoreUnknownKeys = true }
     private val sha256Pattern = Regex("^[a-fA-F0-9]{64}$")
+
+    /**
+     * Resolves the newest published GitHub prerelease that carries an Android update manifest.
+     * GitHub returns releases newest-first, but sorting by its timestamps also protects the
+     * developer channel when a response contains releases from more than one feed page.
+     */
+    fun prereleaseManifestURL(rawReleaseList: String): String {
+        val releases = json.decodeFromString<List<GitHubAndroidRelease>>(rawReleaseList)
+            .asSequence()
+            .filter { it.prerelease && !it.draft }
+            .sortedByDescending { it.publishedAt ?: it.createdAt ?: "" }
+
+        val assetURL = releases
+            .mapNotNull { release ->
+                release.assets.firstOrNull { it.name == ANDROID_MANIFEST_NAME }
+                    ?.browserDownloadURL
+            }
+            .firstOrNull()
+            ?: throw IllegalArgumentException(
+                "No published Android prerelease contains $ANDROID_MANIFEST_NAME.",
+            )
+
+        require(AndroidUpdateNetworkPolicy.isAllowedURL(assetURL)) {
+            "The prerelease update manifest URL is not secure."
+        }
+        return assetURL
+    }
 
     fun availableUpdate(
         rawManifest: String,
@@ -114,5 +158,7 @@ internal object AndroidUpdatePolicy {
             "The downloaded app is not newer than this installation."
         }
     }
+
+    private const val ANDROID_MANIFEST_NAME = "latest-android.json"
 
 }

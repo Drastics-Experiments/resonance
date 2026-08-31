@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Info
@@ -59,6 +60,8 @@ fun SettingsScreen(
     state: ResonanceUiState,
     actions: ResonanceActions,
     onDismiss: () -> Unit,
+    developerMode: Boolean = false,
+    onDeveloperModeChanged: (Boolean) -> Unit = {},
 ) {
     var connectionOpen by remember { mutableStateOf(false) }
     var appearanceOpen by remember { mutableStateOf(false) }
@@ -162,6 +165,11 @@ fun SettingsScreen(
                                     actions::refreshDownloadedSongMetadata
                                 },
                             )
+                            SettingsDivider()
+                            DeveloperModeSettings(
+                                enabled = developerMode,
+                                onEnabledChanged = onDeveloperModeChanged,
+                            )
                         }
                     }
                 }
@@ -207,6 +215,41 @@ fun SettingsScreen(
             selected = state.themeChoice,
             onSelected = actions::setThemeChoice,
             onDismiss = { appearanceOpen = false },
+        )
+    }
+}
+
+@Composable
+private fun DeveloperModeSettings(
+    enabled: Boolean,
+    onEnabledChanged: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onEnabledChanged(!enabled) }
+            .padding(horizontal = 15.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        SettingsIcon(Icons.Default.Code)
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text("Developer Mode", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            Text(
+                if (enabled) {
+                    "Check prerelease updates instead of stable releases."
+                } else {
+                    "Check stable releases only."
+                },
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .55f),
+                fontSize = 11.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Switch(
+            checked = enabled,
+            onCheckedChange = onEnabledChanged,
         )
     }
 }
