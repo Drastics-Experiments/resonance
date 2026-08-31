@@ -62,6 +62,11 @@ cd "$WINDOWS_DIR"
 APP_VERSION="${APP_VERSION:-$(node -p 'require("./package.json").version')}"
 BUILD_NUMBER="${BUILD_NUMBER:-$(node -p 'require("./package.json").resonanceBuild')}"
 RELEASE_BASE_URL="${RELEASE_BASE_URL:-https://github.com/Drastics-Experiments/resonance/releases/download/v${APP_VERSION}}"
+RELEASE_TAG="${RELEASE_TAG:-v${APP_VERSION}}"
+[[ "$RELEASE_TAG" == "v${APP_VERSION}" || "$RELEASE_TAG" =~ ^v${APP_VERSION}-pre\.[1-9][0-9]{9,11}$ ]] || {
+    echo "RELEASE_TAG does not match APP_VERSION: $RELEASE_TAG" >&2
+    exit 64
+}
 
 mkdir -p "$OUTPUT_DIR" "$BUILD_ROOT"
 
@@ -213,8 +218,8 @@ mv "$BUILT_PKG" "$OUTPUT_DIR/Resonance-Installer.pkg"
 ZIP_SHA="$(shasum -a 256 "$BUILT_ZIP" | awk '{print $1}')"
 printf '%s  %s\n' "$ZIP_SHA" "$(basename "$BUILT_ZIP")" > "$OUTPUT_DIR/Resonance-macOS.zip.sha256"
 
-printf '{\n  "version": "%s",\n  "build": "%s",\n  "url": "%s/Resonance-macOS.zip",\n  "sha256": "%s"\n}\n' \
-    "$APP_VERSION" "$BUILD_NUMBER" "${RELEASE_BASE_URL%/}" "$ZIP_SHA" \
+printf '{\n  "version": "%s",\n  "build": "%s",\n  "releaseTag": "%s",\n  "url": "%s/Resonance-macOS.zip",\n  "sha256": "%s"\n}\n' \
+    "$APP_VERSION" "$BUILD_NUMBER" "$RELEASE_TAG" "${RELEASE_BASE_URL%/}" "$ZIP_SHA" \
     > "$OUTPUT_DIR/latest-mac.json"
 
 # Fail early if electron-builder ever regresses the compatibility identity,

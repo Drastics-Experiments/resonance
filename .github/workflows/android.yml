@@ -35,6 +35,10 @@ on:
         required: false
         type: string
         default: ""
+      release_tag:
+        required: false
+        type: string
+        default: ""
       version_override:
         description: Apply version and build inputs inside the runner without changing repository source.
         required: false
@@ -160,8 +164,11 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
           PRODUCTION_SIGNING: ${{ inputs.production_signing }}
         run: |
+          RELEASE_TAG="${RELEASE_TAG:-v${VERSION}}"
+          [[ "$RELEASE_TAG" == "v${VERSION}" || "$RELEASE_TAG" =~ ^v${VERSION}-pre\.[1-9][0-9]{9,11}$ ]]
           METADATA="app/build/outputs/apk/release/output-metadata.json"
           APK="app/build/outputs/apk/release/app-release.apk"
           VERSION_NAME="$(jq -r '.elements[0].versionName' "$METADATA")"
@@ -187,10 +194,11 @@ jobs:
           jq -n \
             --argjson versionCode "$VERSION_CODE" \
             --arg versionName "$VERSION_NAME" \
-            --arg apkUrl "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/${RELEASE_APK}" \
+            --arg releaseTag "$RELEASE_TAG" \
+            --arg apkUrl "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${RELEASE_APK}" \
             --arg sha256 "$SHA256" \
             --argjson sizeBytes "$SIZE_BYTES" \
-            '{schemaVersion: 1, versionCode: $versionCode, versionName: $versionName, apkUrl: $apkUrl, sha256: $sha256, sizeBytes: $sizeBytes}' \
+            '{schemaVersion: 1, versionCode: $versionCode, versionName: $versionName, releaseTag: $releaseTag, apkUrl: $apkUrl, sha256: $sha256, sizeBytes: $sizeBytes}' \
             > ../installers/android/dist/latest-android.json
 
       - name: Upload Android release candidate

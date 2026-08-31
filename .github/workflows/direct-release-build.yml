@@ -1,5 +1,5 @@
 name: Direct release build
-run-name: Direct release v${{ inputs.version }} unsigned=${{ inputs.unsigned_desktop }} replace-prerelease=${{ inputs.replace_prerelease }} (${{ inputs.request_id }})
+run-name: Direct release ${{ inputs.release_tag }} app=v${{ inputs.version }} build=${{ inputs.build_number }} prerelease=${{ inputs.prerelease }} unsigned=${{ inputs.unsigned_desktop }} (${{ inputs.request_id }})
 
 on:
   workflow_dispatch:
@@ -12,6 +12,15 @@ on:
         description: Monotonically increasing cross-platform build number.
         required: true
         type: string
+      release_tag:
+        description: Exact stable or timestamped prerelease Git tag.
+        required: true
+        type: string
+      prerelease:
+        description: Build a timestamped prerelease whose base app version may be reused.
+        required: true
+        type: boolean
+        default: false
       source_sha:
         description: Exact latest main commit to build.
         required: true
@@ -40,7 +49,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: direct-release-${{ inputs.version }}
+  group: direct-release-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 jobs:
@@ -57,6 +66,8 @@ jobs:
       source_tree: ${{ steps.source.outputs.tree }}
       desktop_signing: ${{ steps.release.outputs.desktop_signing }}
       unsigned_desktop: ${{ steps.release.outputs.unsigned_desktop }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      windows_version: ${{ steps.release.outputs.windows_version }}
 
     steps:
       - name: Check out exact source
@@ -72,6 +83,8 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
           BUILD: ${{ inputs.build_number }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           REQUEST_ID: ${{ inputs.request_id }}
           PRODUCTION_RELEASE: ${{ inputs.production_release }}
@@ -82,10 +95,12 @@ jobs:
         run: |
           [[ "$GITHUB_REF" == "refs/heads/main" ]]
           [[ "$PRODUCTION_RELEASE" == "true" ]]
-          [[ "$UNSIGNED_DESKTOP" == "false" ]] || {
+          [[ "$UNSIGNED_DESKTOP" == "true" || "$UNSIGNED_DESKTOP" == "false" ]]
+          [[ "$PRERELEASE" == "true" || "$PRERELEASE" == "false" ]]
+          if [[ "$PRERELEASE" == "false" && "$UNSIGNED_DESKTOP" != "false" ]]; then
             echo "::error::Stable direct releases require production-signed macOS and Windows artifacts."
             exit 1
-          }
+          fi
           [[ "$REPLACE_PRERELEASE" == "true" || "$REPLACE_PRERELEASE" == "false" ]]
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$BUILD" =~ ^[1-9][0-9]*$ ]]
@@ -106,7 +121,15 @@ jobs:
             process.exit(1);
           ' "$VERSION" "$BASE_VERSION"
           (( BUILD > BASE_BUILD ))
-          TAG="v${VERSION}"
+          TAG="$RELEASE_TAG"
+          if [[ "$PRERELEASE" == "true" ]]; then
+            [[ "$TAG" =~ ^v${VERSION}-pre\.([1-9][0-9]{9,11})$ ]]
+            [[ "${BASH_REMATCH[1]}" == "$(git show -s --format=%ct HEAD)" ]]
+            WINDOWS_VERSION="${VERSION}-pre.${BASH_REMATCH[1]}"
+          else
+            [[ "$TAG" == "v${VERSION}" ]]
+            WINDOWS_VERSION="$VERSION"
+          fi
           if [[ "$REPLACE_PRERELEASE" == "true" ]]; then
             git show-ref --verify --quiet "refs/tags/${TAG}"
             RELEASE_JSON="$(gh api "repos/${REPOSITORY}/releases/tags/${TAG}")"
@@ -124,9 +147,16 @@ jobs:
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "desktop_signing=production" >> "$GITHUB_OUTPUT"
-          echo "unsigned_desktop=false" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "windows_version=$WINDOWS_VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$UNSIGNED_DESKTOP" == "true" ]]; then
+            echo "desktop_signing=unsigned" >> "$GITHUB_OUTPUT"
+            echo "unsigned_desktop=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "desktop_signing=production" >> "$GITHUB_OUTPUT"
+            echo "unsigned_desktop=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Record exact source
         id: source
@@ -157,6 +187,7 @@ jobs:
       version_override: true
       version: ${{ needs.prepare.outputs.version }}
       build_number: ${{ needs.prepare.outputs.build }}
+      release_tag: ${{ needs.prepare.outputs.tag }}
       source_ref: ${{ needs.prepare.outputs.source_sha }}
 
   ios:
@@ -186,10 +217,11 @@ jobs:
       RESONANCE_MACOS_NOTARY_ISSUER_ID: ${{ secrets.RESONANCE_MACOS_NOTARY_ISSUER_ID }}
     with:
       release_candidate: true
-      production_signing: true
+      production_signing: ${{ needs.prepare.outputs.unsigned_desktop != 'true' }}
       version_override: true
       version: ${{ needs.prepare.outputs.version }}
       build_number: ${{ needs.prepare.outputs.build }}
+      release_tag: ${{ needs.prepare.outputs.tag }}
       source_ref: ${{ needs.prepare.outputs.source_sha }}
 
   windows:
@@ -202,10 +234,12 @@ jobs:
       RESONANCE_WINDOWS_CERTIFICATE_SHA1: ${{ secrets.RESONANCE_WINDOWS_CERTIFICATE_SHA1 }}
     with:
       release_candidate: true
-      production_signing: true
+      production_signing: ${{ needs.prepare.outputs.unsigned_desktop != 'true' }}
       version_override: true
       version: ${{ needs.prepare.outputs.version }}
       build_number: ${{ needs.prepare.outputs.build }}
+      release_tag: ${{ needs.prepare.outputs.tag }}
+      package_version: ${{ needs.prepare.outputs.windows_version }}
       source_ref: ${{ needs.prepare.outputs.source_sha }}
 
   iphone-installer:
@@ -244,6 +278,7 @@ jobs:
           merge-multiple: true
 
       - name: Download desktop signing evidence
+        if: ${{ needs.prepare.outputs.unsigned_desktop != 'true' }}
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           pattern: release-signing-*
@@ -251,10 +286,22 @@ jobs:
           merge-multiple: true
 
       - name: Validate production-signed asset set
+        if: ${{ needs.prepare.outputs.unsigned_desktop != 'true' }}
         run: >-
           node scripts/validate-release-assets.mjs
           candidate/assets "${{ needs.prepare.outputs.version }}"
+          --release-tag "${{ needs.prepare.outputs.tag }}"
+          --windows-version "${{ needs.prepare.outputs.windows_version }}"
           --signing-evidence candidate/signing
+
+      - name: Validate explicit unsigned desktop asset set
+        if: ${{ needs.prepare.outputs.unsigned_desktop == 'true' }}
+        run: >-
+          node scripts/validate-release-assets.mjs
+          candidate/assets "${{ needs.prepare.outputs.version }}"
+          --release-tag "${{ needs.prepare.outputs.tag }}"
+          --windows-version "${{ needs.prepare.outputs.windows_version }}"
+          --allow-unsigned-desktop-release
 
       - name: Write direct candidate provenance
         shell: bash
@@ -267,6 +314,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           REQUEST_ID: ${{ inputs.request_id }}
           DESKTOP_SIGNING: ${{ needs.prepare.outputs.desktop_signing }}
+          PRERELEASE: ${{ inputs.prerelease }}
           REPLACE_PRERELEASE: ${{ inputs.replace_prerelease }}
         run: |
           node --input-type=module -e '
@@ -282,6 +330,7 @@ jobs:
               workflowRunId: Number(process.env.RUN_ID),
               requestId: process.env.REQUEST_ID,
               desktopSigning: process.env.DESKTOP_SIGNING,
+              prerelease: process.env.PRERELEASE === "true",
               replacePrerelease: process.env.REPLACE_PRERELEASE === "true",
             };
             fs.writeFileSync("candidate/candidate.json", `${JSON.stringify(value, null, 2)}\n`);

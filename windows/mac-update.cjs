@@ -10,7 +10,10 @@ const path = require("node:path");
 // can be exercised from Node tests on every host.
 const MAC_UPDATE_MANIFEST_URL =
   "https://github.com/Drastics-Experiments/resonance/releases/latest/download/latest-mac.json";
+const MAC_UPDATE_RELEASES_API_URL =
+  "https://api.github.com/repos/Drastics-Experiments/resonance/releases?per_page=100";
 const MAC_UPDATE_MAX_MANIFEST_BYTES = 256 * 1024;
+const MAC_UPDATE_MAX_RELEASE_LIST_BYTES = 2 * 1024 * 1024;
 const MAC_UPDATE_MAX_ARCHIVE_BYTES = 512 * 1024 * 1024;
 const MAC_UPDATE_MAX_REDIRECTS = 5;
 const MAC_UPDATE_HOSTS = new Set([
@@ -19,11 +22,37 @@ const MAC_UPDATE_HOSTS = new Set([
   "release-assets.githubusercontent.com",
   "github-releases.githubusercontent.com",
 ]);
+const MAC_UPDATE_API_HOSTS = new Set(["api.github.com"]);
 const SEMANTIC_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const RELEASE_TAG_PATTERN = /^v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))(?:-pre\.([1-9]\d{9,11}))?$/;
+const RELEASE_ASSET_PREFIX = "/Drastics-Experiments/resonance/releases/download/";
+const MAC_ARCHIVE_NAME = "Resonance-macOS.zip";
 
 function normalizedVersion(value) {
   const version = String(value || "").trim().replace(/^v/i, "");
   return SEMANTIC_VERSION.test(version) ? version : null;
+}
+
+function parseMacReleaseTag(value) {
+  const tag = String(value || "").trim();
+  const match = RELEASE_TAG_PATTERN.exec(tag);
+  if (!match) return null;
+  const timestamp = match[2] ? Number(match[2]) : null;
+  if (timestamp !== null && (!Number.isSafeInteger(timestamp) || timestamp <= 0)) return null;
+  return Object.freeze({
+    tag,
+    version: match[1],
+    prerelease: timestamp !== null,
+    sourceTimestamp: timestamp,
+  });
+}
+
+function releaseAssetURL(value, tag, assetName) {
+  let url;
+  try { url = new URL(String(value || "")); } catch { return null; }
+  if (!allowsMacUpdateURL(url, new Set(["github.com"]))) return null;
+  if (url.search || url.pathname !== `${RELEASE_ASSET_PREFIX}${tag}/${assetName}`) return null;
+  return url;
 }
 
 function comparePrerelease(left, right) {
@@ -66,6 +95,34 @@ function compareMacVersions(leftValue, rightValue) {
     }
   }
   return comparePrerelease(leftPrerelease, rightPrerelease);
+}
+
+function compareMacReleaseCandidates(left, right) {
+  const leftTag = parseMacReleaseTag(left?.releaseTag || left?.tag);
+  const rightTag = parseMacReleaseTag(right?.releaseTag || right?.tag);
+  if (!leftTag || !rightTag) return 0;
+  const versionResult = compareMacVersions(leftTag.version, rightTag.version);
+  if (versionResult) return versionResult;
+  if (leftTag.prerelease !== rightTag.prerelease) return leftTag.prerelease ? -1 : 1;
+
+  const leftBuild = Number(normalizedBuild(left?.build) || 0);
+  const rightBuild = Number(normalizedBuild(right?.build) || 0);
+  if (leftBuild !== rightBuild) return leftBuild > rightBuild ? 1 : -1;
+
+  const leftTimestamp = leftTag.sourceTimestamp || 0;
+  const rightTimestamp = rightTag.sourceTimestamp || 0;
+  if (leftTimestamp !== rightTimestamp) return leftTimestamp > rightTimestamp ? 1 : -1;
+
+  // A release list is not guaranteed to be returned in a stable order. The
+  // tag is unique for timestamped prereleases, so use it as the final stable
+  // tie-breaker for otherwise identical metadata.
+  return leftTag.tag === rightTag.tag ? 0 : leftTag.tag > rightTag.tag ? 1 : -1;
+}
+
+function selectNewestMacRelease(candidates) {
+  return [...(Array.isArray(candidates) ? candidates : [])]
+    .filter((candidate) => parseMacReleaseTag(candidate?.releaseTag || candidate?.tag))
+    .sort((left, right) => compareMacReleaseCandidates(right, left))[0] || null;
 }
 
 function normalizedBuild(value) {
@@ -169,7 +226,23 @@ async function responseBytes(response, maximumBytes, label) {
     await cancelBody(response);
     throw new Error(`${label} is too large.`);
   }
-  if (!response.body) return Buffer.alloc(0);
+  // Small response doubles used by tests may expose json() without a body
+  // stream. Keep that fallback bounded as well; native fetch responses use the
+  // streaming path below.
+  if (!response.body) {
+    if (typeof response.json === "function") {
+      const value = await response.json();
+      const encoded = Buffer.from(JSON.stringify(value));
+      if (encoded.length > maximumBytes) throw new Error(`${label} is too large.`);
+      return encoded;
+    }
+    if (typeof response.text === "function") {
+      const encoded = Buffer.from(String(await response.text()));
+      if (encoded.length > maximumBytes) throw new Error(`${label} is too large.`);
+      return encoded;
+    }
+    return Buffer.alloc(0);
+  }
   const reader = response.body.getReader();
   const chunks = [];
   let total = 0;
@@ -191,7 +264,7 @@ async function responseBytes(response, maximumBytes, label) {
   return Buffer.concat(chunks, total);
 }
 
-function normalizeMacUpdateManifest(value) {
+function normalizeMacUpdateManifest(value, { releaseTag } = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("The macOS update manifest is invalid.");
   }
@@ -204,13 +277,19 @@ function normalizeMacUpdateManifest(value) {
   if (!version || !build || !url || !allowsMacUpdateURL(url, new Set(["github.com"])) || !/^[a-f0-9]{64}$/.test(sha256)) {
     throw new Error("The macOS update manifest is invalid.");
   }
-  return Object.freeze({ version, build, url: url.href, sha256 });
+  const normalized = { version, build, url: url.href, sha256 };
+  const requestedReleaseTag = releaseTag === undefined ? value.releaseTag : releaseTag;
+  if (requestedReleaseTag !== undefined) {
+    const parsedTag = parseMacReleaseTag(requestedReleaseTag);
+    if (!parsedTag || parsedTag.version !== version) {
+      throw new Error("The macOS update manifest has an invalid release tag.");
+    }
+    normalized.releaseTag = parsedTag.tag;
+  }
+  return Object.freeze(normalized);
 }
 
-async function fetchMacUpdateManifest({
-  manifestURL = MAC_UPDATE_MANIFEST_URL,
-  fetchImpl = fetch,
-} = {}) {
+async function fetchManifestAtURL(manifestURL, fetchImpl, releaseTag) {
   let url;
   try { url = new URL(String(manifestURL)); } catch { throw new Error("The macOS update manifest URL is invalid."); }
   if (!allowsMacUpdateURL(url, new Set(["github.com"]))) {
@@ -223,12 +302,72 @@ async function fetchMacUpdateManifest({
   let payload;
   try { payload = JSON.parse(raw.toString("utf8")); }
   catch { throw new Error("The macOS update manifest is not valid JSON."); }
-  return normalizeMacUpdateManifest(payload);
+  return normalizeMacUpdateManifest(payload, releaseTag === undefined ? {} : { releaseTag });
 }
 
-function updateArchiveFilename(version) {
+async function fetchMacReleaseList(fetchImpl = fetch) {
+  const response = await trustedFetch(MAC_UPDATE_RELEASES_API_URL, {
+    headers: {
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Cache-Control": "no-cache",
+    },
+  }, { fetchImpl, allowedHosts: MAC_UPDATE_API_HOSTS });
+  const raw = await responseBytes(response, MAC_UPDATE_MAX_RELEASE_LIST_BYTES, "The macOS release list");
+  let releases;
+  try { releases = JSON.parse(raw.toString("utf8")); }
+  catch { throw new Error("The macOS release list is not valid JSON."); }
+  if (!Array.isArray(releases)) throw new Error("The macOS release list is invalid.");
+  return releases;
+}
+
+async function discoverMacUpdateManifest({ fetchImpl = fetch } = {}) {
+  const releases = await fetchMacReleaseList(fetchImpl);
+  const candidates = releases
+    .filter((release) => release && !release.draft && Array.isArray(release.assets))
+    .map((release) => ({ release, tag: parseMacReleaseTag(release.tag_name) }))
+    .filter(({ release, tag }) => tag && Boolean(release.prerelease) === tag.prerelease)
+    .sort((left, right) => compareMacReleaseCandidates(
+      { releaseTag: right.tag.tag },
+      { releaseTag: left.tag.tag },
+    ));
+  for (const { release, tag } of candidates) {
+    const asset = release.assets.find((candidate) => candidate?.name === "latest-mac.json");
+    const manifestURL = releaseAssetURL(asset?.browser_download_url, tag.tag, "latest-mac.json");
+    if (!manifestURL) continue;
+    try {
+      const manifest = await fetchManifestAtURL(manifestURL, fetchImpl, tag.tag);
+      if (manifest.version !== tag.version) continue;
+      if (!releaseAssetURL(manifest.url, tag.tag, MAC_ARCHIVE_NAME)) continue;
+      return Object.freeze({
+        ...manifest,
+        releaseTag: tag.tag,
+        prerelease: tag.prerelease,
+        sourceTimestamp: tag.sourceTimestamp,
+      });
+    } catch {
+      // An incomplete or malformed release must not hide an older usable one.
+    }
+  }
+  throw new Error("No published macOS release contains latest-mac.json.");
+}
+
+async function fetchMacUpdateManifest({
+  manifestURL,
+  fetchImpl = fetch,
+} = {}) {
+  const requested = String(manifestURL || "").trim();
+  if (!requested) {
+    return discoverMacUpdateManifest({ fetchImpl });
+  }
+  return fetchManifestAtURL(requested, fetchImpl);
+}
+
+function updateArchiveFilename(version, releaseTag) {
   const normalized = normalizedVersion(version);
   if (!normalized) throw new Error("The macOS update version is invalid.");
+  const parsedTag = releaseTag ? parseMacReleaseTag(releaseTag) : null;
+  if (parsedTag?.prerelease) return `Resonance-macOS-${normalized}-${parsedTag.sourceTimestamp}.zip`;
   return `Resonance-macOS-${normalized}.zip`;
 }
 
@@ -282,8 +421,8 @@ async function downloadMacUpdate({
     throw new Error("The macOS update archive is too large.");
   }
   await fs.mkdir(destinationDirectory, { recursive: true });
-  const temporary = path.join(destinationDirectory, `.${updateArchiveFilename(normalized.version)}.${randomUUID()}.part`);
-  const destination = path.join(destinationDirectory, updateArchiveFilename(normalized.version));
+  const temporary = path.join(destinationDirectory, `.${updateArchiveFilename(normalized.version, normalized.releaseTag)}.${randomUUID()}.part`);
+  const destination = path.join(destinationDirectory, updateArchiveFilename(normalized.version, normalized.releaseTag));
   const file = await fs.open(temporary, "wx");
   const hash = createHash("sha256");
   let received = 0;
@@ -355,18 +494,25 @@ async function launchMacUpdateInstaller({
 
 module.exports = {
   MAC_UPDATE_HOSTS,
+  MAC_UPDATE_RELEASES_API_URL,
   MAC_UPDATE_MANIFEST_URL,
   MAC_UPDATE_MAX_ARCHIVE_BYTES,
   MAC_UPDATE_MAX_MANIFEST_BYTES,
+  MAC_UPDATE_MAX_RELEASE_LIST_BYTES,
   allowsMacUpdateURL,
   compareMacVersions,
+  compareMacReleaseCandidates,
   downloadMacUpdate,
+  discoverMacUpdateManifest,
   fetchMacUpdateManifest,
+  fetchMacReleaseList,
   isMacUpdateAvailable,
   launchMacUpdateInstaller,
   normalizeMacUpdateManifest,
   normalizedBuild,
   normalizedVersion,
+  parseMacReleaseTag,
+  selectNewestMacRelease,
   sha256File,
   trustedFetch,
   updateArchiveFilename,

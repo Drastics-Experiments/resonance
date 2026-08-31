@@ -48,6 +48,10 @@ on:
         required: false
         type: string
         default: ""
+      release_tag:
+        required: false
+        type: string
+        default: ""
       version_override:
         description: Apply version and build inputs inside the runner without changing repository source.
         required: false
@@ -248,7 +252,8 @@ jobs:
         env:
           APP_VERSION: ${{ steps.release.outputs.version }}
           BUILD_NUMBER: ${{ steps.release.outputs.build }}
-          RELEASE_BASE_URL: ${{ format('https://github.com/Drastics-Experiments/resonance/releases/download/v{0}', steps.release.outputs.version) }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_BASE_URL: ${{ format('https://github.com/Drastics-Experiments/resonance/releases/download/{0}', inputs.release_tag || format('v{0}', steps.release.outputs.version)) }}
           MAC_UPDATE_AUTHENTICITY: ${{ inputs.release_candidate && inputs.production_signing && 'production' || 'development' }}
           CSC_IDENTITY_AUTO_DISCOVERY: ${{ inputs.release_candidate && inputs.production_signing && 'true' || 'false' }}
           CSC_LINK: ${{ inputs.release_candidate && inputs.production_signing && secrets.RESONANCE_MACOS_APP_CERTIFICATE_BASE64 || '' }}
@@ -266,6 +271,7 @@ jobs:
         env:
           EXPECTED_VERSION: ${{ steps.release.outputs.version }}
           EXPECTED_BUILD: ${{ steps.release.outputs.build }}
+          EXPECTED_TAG: ${{ inputs.release_tag || format('v{0}', steps.release.outputs.version) }}
           EXPECTED_SIGNING: ${{ inputs.release_candidate && inputs.production_signing && 'production' || 'unsigned' }}
         run: |
           test -s installers/macos/dist/Resonance-macOS.zip
@@ -277,7 +283,7 @@ jobs:
             const expectedVersion = process.env.EXPECTED_VERSION;
             const expectedBuild = process.env.EXPECTED_BUILD;
             const manifest = JSON.parse(fs.readFileSync("installers/macos/dist/latest-mac.json", "utf8"));
-            if (manifest.version !== expectedVersion || String(manifest.build) !== String(expectedBuild)) {
+            if (manifest.version !== expectedVersion || String(manifest.build) !== String(expectedBuild) || manifest.releaseTag !== process.env.EXPECTED_TAG) {
               throw new Error(`latest-mac.json metadata mismatch: ${JSON.stringify(manifest)}`);
             }
           '

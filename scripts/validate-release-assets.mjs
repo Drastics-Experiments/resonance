@@ -123,10 +123,24 @@ function validateDesktopSigningEvidence(assetDirectory, version, signingEvidence
 export function validateReleaseAssets(
   assetDirectoryArgument,
   version,
-  { requireDesktopSignatures = true, signingEvidenceDirectory } = {},
+  {
+    requireDesktopSignatures = true,
+    signingEvidenceDirectory,
+    releaseTag = `v${version}`,
+    windowsVersion = version,
+  } = {},
 ) {
   if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) {
     fail(`invalid semantic version: ${version}`);
+  }
+  const escapedBaseVersion = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!new RegExp(`^v${escapedBaseVersion}(?:-pre\\.[1-9][0-9]{9,11})?$`).test(releaseTag)) {
+    fail(`invalid release tag for ${version}: ${releaseTag}`);
+  }
+  const prereleaseTimestamp = releaseTag.match(/-pre\.([1-9][0-9]{9,11})$/)?.[1];
+  const expectedWindowsVersion = prereleaseTimestamp ? `${version}-pre.${prereleaseTimestamp}` : version;
+  if (windowsVersion !== expectedWindowsVersion) {
+    fail(`invalid Windows updater version for ${releaseTag}: ${windowsVersion}`);
   }
   const assetDirectory = path.resolve(assetDirectoryArgument);
   const windowsInstaller = `Resonance-Setup-${version}.exe`;
@@ -192,16 +206,22 @@ export function validateReleaseAssets(
   if (macManifest.version !== version) {
     fail(`latest-mac.json version is ${macManifest.version}, expected ${version}`);
   }
+  if (macManifest.releaseTag !== releaseTag) {
+    fail(`latest-mac.json release tag is ${macManifest.releaseTag}, expected ${releaseTag}`);
+  }
   if (macManifest.sha256 !== macSha256) {
     fail("latest-mac.json SHA-256 does not match Resonance-macOS.zip");
   }
-  if (!String(macManifest.url).endsWith(`/releases/download/v${version}/Resonance-macOS.zip`)) {
+  if (!String(macManifest.url).endsWith(`/releases/download/${releaseTag}/Resonance-macOS.zip`)) {
     fail(`latest-mac.json has an unexpected URL: ${macManifest.url}`);
   }
 
   const androidManifest = JSON.parse(readAsset("latest-android.json").toString("utf8"));
   if (androidManifest.versionName !== version) {
     fail(`latest-android.json version is ${androidManifest.versionName}, expected ${version}`);
+  }
+  if (androidManifest.releaseTag !== releaseTag) {
+    fail(`latest-android.json release tag is ${androidManifest.releaseTag}, expected ${releaseTag}`);
   }
   if (!Number.isSafeInteger(androidManifest.versionCode) || androidManifest.versionCode < 1) {
     fail("latest-android.json has an invalid versionCode");
@@ -212,12 +232,12 @@ export function validateReleaseAssets(
   if (androidManifest.sizeBytes !== fs.statSync(path.join(assetDirectory, androidPackage)).size) {
     fail("latest-android.json size does not match the Android package");
   }
-  if (!String(androidManifest.apkUrl).endsWith(`/releases/download/v${version}/${androidPackage}`)) {
+  if (!String(androidManifest.apkUrl).endsWith(`/releases/download/${releaseTag}/${androidPackage}`)) {
     fail(`latest-android.json has an unexpected URL: ${androidManifest.apkUrl}`);
   }
 
   const windowsManifest = readAsset("latest.yml").toString("utf8");
-  const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedVersion = windowsVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const escapedInstaller = windowsInstaller.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   if (!new RegExp(`^version:\\s*["']?${escapedVersion}["']?\\s*$`, "m").test(windowsManifest)) {
     fail("latest.yml does not contain the expected version");
@@ -259,16 +279,25 @@ if (path.resolve(process.argv[1] || "") === scriptPath) {
     signingEvidenceDirectory = arguments_[signingEvidenceIndex + 1];
     arguments_.splice(signingEvidenceIndex, 2);
   }
+  const releaseTagIndex = arguments_.indexOf("--release-tag");
+  const releaseTag = releaseTagIndex === -1 ? undefined : arguments_[releaseTagIndex + 1];
+  if (releaseTagIndex !== -1) arguments_.splice(releaseTagIndex, 2);
+  const windowsVersionIndex = arguments_.indexOf("--windows-version");
+  const windowsVersion = windowsVersionIndex === -1 ? undefined : arguments_[windowsVersionIndex + 1];
+  if (windowsVersionIndex !== -1) arguments_.splice(windowsVersionIndex, 2);
   const [assetDirectory, version] = arguments_;
   if (
     process.exitCode ||
     !assetDirectory ||
     !version ||
     arguments_.length !== 2 ||
-    (signingEvidenceIndex !== -1 && !signingEvidenceDirectory)
+    (signingEvidenceIndex !== -1 && !signingEvidenceDirectory) ||
+    (releaseTagIndex !== -1 && !releaseTag) ||
+    (windowsVersionIndex !== -1 && !windowsVersion)
   ) {
     console.error(
       "usage: validate-release-assets.mjs <asset-directory> <version> " +
+        "[--release-tag <tag>] [--windows-version <version>] " +
         "[--signing-evidence <directory> | --allow-unsigned-desktop-release]",
     );
     process.exitCode = 1;
@@ -280,6 +309,8 @@ if (path.resolve(process.argv[1] || "") === scriptPath) {
       const assets = validateReleaseAssets(assetDirectory, version, {
         requireDesktopSignatures: !allowUnsignedDevelopment,
         signingEvidenceDirectory,
+        releaseTag,
+        windowsVersion,
       });
       const suffix = allowUnsignedDevelopment
         ? " (explicit unsigned desktop release mode)"

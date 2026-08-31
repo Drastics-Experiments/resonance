@@ -45,6 +45,11 @@ class AndroidUpdateManager(
         val connection: HttpURLConnection,
     )
 
+    private data class FetchedUpdateManifest(
+        val body: String,
+        val releaseTag: String? = null,
+    )
+
     private val appContext = context.applicationContext
     private val preferences = appContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
     private val updateDirectory = File(appContext.cacheDir, "updates")
@@ -86,13 +91,14 @@ class AndroidUpdateManager(
         val checkingDeveloperMode = mutableDeveloperMode.value
         mutableState.value = AndroidUpdateState.Checking
         runCatching {
-            val rawManifest = withContext(Dispatchers.IO) {
+            val manifest = withContext(Dispatchers.IO) {
                 fetchUpdateManifest(checkingDeveloperMode)
             }
             AndroidUpdatePolicy.availableUpdate(
-                rawManifest = rawManifest,
+                rawManifest = manifest.body,
                 currentVersionCode = BuildConfig.VERSION_CODE.toLong(),
                 allowInsecureDownloadUrl = BuildConfig.DEBUG && isEmulatorTestUrl(manifestUrl),
+                expectedReleaseTag = manifest.releaseTag,
             )
         }.onSuccess { update ->
             if (generation != operationGeneration || checkingDeveloperMode != mutableDeveloperMode.value) return@onSuccess
@@ -105,15 +111,18 @@ class AndroidUpdateManager(
         }
     }
 
-    private fun fetchUpdateManifest(developerMode: Boolean): String {
-        if (!developerMode) return fetchText(manifestUrl)
+    private fun fetchUpdateManifest(developerMode: Boolean): FetchedUpdateManifest {
+        if (!developerMode) return FetchedUpdateManifest(fetchText(manifestUrl))
 
         val releases = fetchText(
             PRERELEASES_API_URL,
             maximumBytes = MAX_RELEASE_LIST_BYTES,
         )
-        val prereleaseManifestURL = AndroidUpdatePolicy.prereleaseManifestURL(releases)
-        return fetchText(prereleaseManifestURL)
+        val prereleaseManifest = AndroidUpdatePolicy.prereleaseManifest(releases)
+        return FetchedUpdateManifest(
+            body = fetchText(prereleaseManifest.url),
+            releaseTag = prereleaseManifest.releaseTag,
+        )
     }
 
     suspend fun downloadUpdate(update: AndroidUpdateInfo): File? {
@@ -383,7 +392,7 @@ class AndroidUpdateManager(
         const val DEFAULT_MANIFEST_URL =
             "https://github.com/Drastics-Experiments/resonance/releases/latest/download/latest-android.json"
         const val PRERELEASES_API_URL =
-            "https://api.github.com/repos/Drastics-Experiments/resonance/releases?per_page=30"
+            "https://api.github.com/repos/Drastics-Experiments/resonance/releases?per_page=100"
         private const val PREFERENCES_NAME = "resonance.android-updater"
         private const val LAST_CHECK_KEY = "last-successful-check-ms"
         private const val DEVELOPER_MODE_KEY = "developer-mode"

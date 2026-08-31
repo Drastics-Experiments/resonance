@@ -56,6 +56,7 @@ function writeFixture(root) {
     `${JSON.stringify({
       version,
       build: "99",
+      releaseTag: `v${version}`,
       url: `https://github.com/Drastics-Experiments/resonance/releases/download/v${version}/Resonance-macOS.zip`,
       sha256: digest(path.join(assets, "Resonance-macOS.zip"), "sha256", "hex"),
     })}\n`,
@@ -65,6 +66,7 @@ function writeFixture(root) {
     `${JSON.stringify({
       versionName: version,
       versionCode: 99,
+      releaseTag: `v${version}`,
       apkUrl: `https://github.com/Drastics-Experiments/resonance/releases/download/v${version}/${androidPackage}`,
       sha256: digest(path.join(assets, androidPackage), "sha256", "hex"),
       sizeBytes: fs.statSync(path.join(assets, androidPackage)).size,
@@ -91,6 +93,38 @@ function withFixture(callback) {
 test("production validation requires hash-bound desktop signing evidence", () => {
   withFixture(({ assets, signing }) => {
     assert.equal(validateReleaseAssets(assets, version, { signingEvidenceDirectory: signing }).length, 18);
+  });
+});
+
+test("timestamped prerelease manifests bind every updater to the exact tag", () => {
+  withFixture(({ assets }) => {
+    const releaseTag = `v${version}-pre.1788150123`;
+    const windowsVersion = `${version}-pre.1788150123`;
+    const macPath = path.join(assets, "latest-mac.json");
+    const mac = JSON.parse(fs.readFileSync(macPath, "utf8"));
+    mac.releaseTag = releaseTag;
+    mac.url = mac.url.replace(`/v${version}/`, `/${releaseTag}/`);
+    fs.writeFileSync(macPath, `${JSON.stringify(mac)}\n`);
+    const androidPath = path.join(assets, "latest-android.json");
+    const android = JSON.parse(fs.readFileSync(androidPath, "utf8"));
+    android.releaseTag = releaseTag;
+    android.apkUrl = android.apkUrl.replace(`/v${version}/`, `/${releaseTag}/`);
+    fs.writeFileSync(androidPath, `${JSON.stringify(android)}\n`);
+    const windowsPath = path.join(assets, "latest.yml");
+    fs.writeFileSync(
+      windowsPath,
+      fs.readFileSync(windowsPath, "utf8").replace(`version: ${version}`, `version: ${windowsVersion}`),
+    );
+
+    assert.equal(validateReleaseAssets(assets, version, {
+      requireDesktopSignatures: false,
+      releaseTag,
+      windowsVersion,
+    }).length, 18);
+    assert.throws(
+      () => validateReleaseAssets(assets, version, { requireDesktopSignatures: false, releaseTag }),
+      /invalid Windows updater version/,
+    );
   });
 });
 
