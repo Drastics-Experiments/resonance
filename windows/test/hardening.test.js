@@ -23,9 +23,7 @@ import {
   persistentPlaybackIDs,
   resolveServerTransferModes,
   SAFE_CLIENT_CONFIG,
-  setServerTransferPreference,
   serverUploadConfigurationError,
-  serverUploadManifestCanCleanup,
   serverUploadManifestRetryIDs,
   summarizeListeningHistory,
 } from "../ui/core.js";
@@ -127,14 +125,12 @@ test("uses fail-closed transfer defaults and scopes persisted mode preferences",
     },
     kill_switches: { ...SAFE_CLIENT_CONFIG.kill_switches, link_imports: false },
   };
-  setServerTransferPreference(state, {
-    serverURL: "https://music.example/a",
-    profileID: "listener-a",
-    uploadMode: "server_source_link",
-    downloadMode: "verified_file_cache",
-    config: enabled,
-    now: Date.parse("2026-08-06T18:00:00.000Z"),
-  });
+  state.serverTransferPreferences = {
+    "https://music.example#profile=listener-a": {
+      uploadMode: "server_source_link",
+      downloadMode: "verified_file_cache",
+    },
+  };
   assert.equal(resolveServerTransferModes({
     state,
     serverURL: "https://music.example/b",
@@ -602,7 +598,7 @@ test("storage classification follows physical location instead of remote associa
   assert.equal(physicalStorageClassForTrack({ remoteID: "legacy" }), "downloads");
 });
 
-test("upload manifests retain per-file failures and never allow cleanup before success", () => {
+test("upload manifests retain per-file failures and retry only unsuccessful files", () => {
   const manifest = normalizeServerUploadManifest({
     id: "batch-1",
     serverOrigin: "https://music.example/api",
@@ -616,10 +612,9 @@ test("upload manifests retain per-file failures and never allow cleanup before s
   });
   assert.equal(manifest.serverOrigin, "https://music.example");
   assert.deepEqual(serverUploadManifestRetryIDs(manifest), ["retry"]);
-  assert.equal(serverUploadManifestCanCleanup(manifest), false);
   manifest.items[1].status = "uploaded";
   manifest.items[1].message = null;
-  assert.equal(serverUploadManifestCanCleanup(manifest), true);
+  assert.deepEqual(serverUploadManifestRetryIDs(manifest), []);
 
   const linkImportManifest = normalizeServerUploadManifest({
     ...manifest,
@@ -736,10 +731,6 @@ test("Windows renderer and main-process integrations retain the hardening bounda
     appSource.indexOf("async function resolveLinkImport()"),
     appSource.indexOf("async function confirmPlaylistImport()"),
   );
-  const directSourceImportHandler = appSource.slice(
-    appSource.indexOf("async function confirmServerSourceImport()"),
-    appSource.indexOf("async function confirmLinkImport()"),
-  );
   const confirmLinkImportHandler = appSource.slice(
     appSource.indexOf("async function confirmLinkImport()"),
     appSource.indexOf("async function cancelLinkImport()"),
@@ -847,14 +838,11 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.doesNotMatch(resolveLinkImportHandler, /localImportServerUploadMode === "server_source_link"[\s\S]+await confirmLinkImport\(\);[\s\S]+return;/);
   assert.match(resolveLinkImportHandler, /const reviewedDiscovery = localImportServerUploadMode === "reviewed_match"[\s\S]+reviewedContext = currentServerUploadContext\(\)[\s\S]+adminToken: reviewedContext\?\.adminToken \|\| ""/);
   assert.doesNotMatch(resolveLinkImportHandler, /adminToken: serverAdminToken/);
-  assert.doesNotMatch(directSourceImportHandler, /resolveLocalImport|reviewed_match|candidate/);
-  assert.match(directSourceImportHandler, /exactYouTubeSourcePageURL\(\$\("#localImportSource"\)\.value\)/);
-  assert.match(directSourceImportHandler, /api\.importServerSource\(\{/);
   const directConfirmBranch = confirmLinkImportHandler.slice(0, confirmLinkImportHandler.indexOf("if (!localImportResolution) return;"));
   assert.doesNotMatch(directConfirmBranch, /confirmServerSourceImport\(\)/);
   assert.doesNotMatch(confirmLinkImportHandler, /requiresLocalFile: true/);
   assert.match(confirmLinkImportHandler, /api\.startLocalImport\(\{/);
-  assert.match(confirmLinkImportHandler, /reviewedUpload[\s\S]+uploadReviewedMatchTrack\(importedTrack, importContext\)[\s\S]+uploadImportedTrackWithMode\(/);
+  assert.match(confirmLinkImportHandler, /uploadImportedTrackWithMode\([\s\S]+reviewedUpload \? "reviewed_match"/);
   assert.match(confirmLinkImportHandler, /localImportServerUploadMode === "server_source_link" \? "server_source_link" : "local_file"/);
 
   assert.match(appSource, /data-remote-row="\$\{escapeHTML\(song\.id\)\}"/);
@@ -876,7 +864,7 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   assert.match(appSource, /context = currentProfileContext\(\)[\s\S]+api\.postListeningHistory\(\{[\s\S]+baseURL: context\.serverURL,[\s\S]+token: context\.token/);
   assert.match(appSource, /api\.fetchListeningHistory\(\{[\s\S]+profileID: context\.profileID[\s\S]+profileContextIsCurrent\(context\)[\s\S]+mergeListeningHistoryDocument\(state, remoteDocument, context\.profileID, context\.serverURL, serverCatalog\)/);
   assert.match(appSource, /row\.onkeydown = \(event\) => \{[\s\S]+event\.key === "Enter" \|\| event\.key === " "/);
-  assert.match(appSource, /function bindRemoteRows\(\)[\s\S]+const primaryAction = row\.querySelector\("\[data-remote-activate\]"\)[\s\S]+const activate = \(\) => \{[\s\S]+playRemoteStream\(song\)[\s\S]+primaryAction\.onclick = activate[\s\S]+primaryAction\.onkeydown/);
+  assert.match(appSource, /function bindRemoteRows\(root = document\)[\s\S]+const primaryAction = row\.querySelector\("\[data-remote-activate\]"\)[\s\S]+const activate = \(\) => \{[\s\S]+playRemoteStream\(song\)[\s\S]+primaryAction\.onclick = activate[\s\S]+primaryAction\.onkeydown/);
   assert.match(appSource, /button\.tabIndex = active \? 0 : -1/);
   assert.match(appSource, /\["ArrowLeft", "ArrowRight", "Home", "End"\]\.includes\(event\.key\)/);
   assert.match(appSource, /function focusSearchSortOption[\s\S]+\["ArrowDown", "ArrowUp", "Home", "End"\]\.includes\(event\.key\)/);

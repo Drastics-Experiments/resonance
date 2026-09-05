@@ -177,11 +177,6 @@ export function normalizedRemoteSongMetadataCache(value, now = Date.now()) {
   return normalized;
 }
 
-export function playlistArtworkTrackIDs(playlist) {
-  if (!playlist || playlist.isSystem || !Array.isArray(playlist.trackIDs)) return [];
-  return playlist.trackIDs.slice(0, 4);
-}
-
 const DEFAULT_KEYBINDS = Object.freeze({
   togglePlayback: "Space",
   previousTrack: "Ctrl+ArrowLeft",
@@ -427,18 +422,6 @@ export function resolveServerTransferModes({
     uploadMode: available.upload.includes(selected?.uploadMode) ? selected.uploadMode : (available.upload[0] || null),
     downloadMode: available.download.includes(selected?.downloadMode) ? selected.downloadMode : available.download[0],
   };
-}
-
-export function setServerTransferPreference(state, { serverURL, profileID, uploadMode, downloadMode, config = SAFE_CLIENT_CONFIG, now = Date.now() } = {}) {
-  if (!state || typeof state !== "object") return resolveServerTransferModes({ state, serverURL, profileID, config, now });
-  const resolved = resolveServerTransferModes({ state, serverURL, profileID, config, now });
-  if (!resolved.key) return resolved;
-  state.serverTransferPreferences = normalizedServerTransferPreferences(state.serverTransferPreferences);
-  state.serverTransferPreferences[resolved.key] = {
-    uploadMode: resolved.available.upload.includes(uploadMode) ? uploadMode : resolved.uploadMode,
-    downloadMode: resolved.available.download.includes(downloadMode) ? downloadMode : resolved.downloadMode,
-  };
-  return resolveServerTransferModes({ state, serverURL, profileID, config, now });
 }
 
 export function titleMarqueeMetrics(contentWidth, availableWidth, loopSpacing = 56) {
@@ -753,11 +736,6 @@ export function serverUploadManifestRetryIDs(value) {
     .map((item) => item.retryID) : [];
 }
 
-export function serverUploadManifestCanCleanup(value) {
-  const manifest = normalizeServerUploadManifest(value);
-  return Boolean(manifest?.items.length) && manifest.items.every((item) => item.status === "uploaded");
-}
-
 export function physicalStorageClassForTrack(track) {
   if (track?.storageLocation === "server-cache") return "downloads";
   if (track?.storageLocation === "external") return "external";
@@ -869,25 +847,37 @@ export function hydrateListeningHistoryFromCatalog(
   return changed;
 }
 
-function listeningHistoryTrackSnapshot(state, entry) {
-  const profileID = entry?.profileID || "default";
-  const remoteID = optionalHistoryText(entry?.remoteID, 128);
+// A fresh index belongs to one synchronous history calculation/render.
+export function createListeningHistoryIndex(state) {
   const activeTracks = tracksForActiveProfile(state);
-  const identityTrack = activeTracks.find((item) => item?.id === entry?.trackID)
-    || (remoteID ? activeTracks.find((item) =>
-      item?.remoteID === remoteID && (item.syncProfileID || "default") === profileID) : null);
-  const localMetadataMatches = identityTrack ? [] : activeTracks.filter((item) =>
-    !item?.remoteID
-      && (item?.filePath || item?.fileUrl)
-      && serverSongMetadataMatches(item, {
-        title: entry?.title,
-        artist: entry?.artist,
-        duration: entry?.duration,
-      }));
+  const tracksByID = indexFirstByID(activeTracks);
+  const tracksByRemoteProfile = indexFirstByID(activeTracks, (track) => JSON.stringify([track?.remoteID, track?.syncProfileID || "default"]));
+  const localByTitle = new Map();
+  for (const track of activeTracks) {
+    if (!track || track.remoteID || !(track.filePath || track.fileUrl)) continue;
+    const key = normalizedServerSongIdentityText(track.title);
+    if (!localByTitle.has(key)) localByTitle.set(key, []);
+    localByTitle.get(key).push(track);
+  }
+  return {
+    tracksByID, localByTitle, snapshots: new Map(),
+    identityTrack: (entry) => tracksByID.get(entry?.trackID)
+      || (optionalHistoryText(entry?.remoteID, 128) ? tracksByRemoteProfile.get(JSON.stringify([
+        optionalHistoryText(entry.remoteID, 128), entry.profileID || "default",
+      ])) : null),
+  };
+}
+
+function listeningHistoryTrackSnapshot(state, entry, index = createListeningHistoryIndex(state)) {
+  if (index.snapshots.has(entry)) return index.snapshots.get(entry);
+  const remoteID = optionalHistoryText(entry?.remoteID, 128);
+  const identityTrack = index.identityTrack(entry);
+  const localMetadataMatches = identityTrack ? [] : (index.localByTitle.get(normalizedServerSongIdentityText(entry?.title)) || [])
+    .filter((item) => serverSongMetadataMatches(item, { title: entry?.title, artist: entry?.artist, duration: entry?.duration }));
   const track = identityTrack || (localMetadataMatches.length === 1 ? localMetadataMatches[0] : null);
   const trackDuration = normalizedHistoryDuration(track?.duration);
   const entryDuration = normalizedHistoryDuration(entry?.duration);
-  return {
+  const snapshot = {
     id: track?.id || entry?.trackID,
     remoteID: track?.remoteID || remoteID,
     title: preferredListeningHistoryMetadata("title", track?.title, entry?.title) || "Unknown song",
@@ -901,12 +891,14 @@ function listeningHistoryTrackSnapshot(state, entry) {
     ),
     fileUrl: track?.fileUrl || null,
   };
+  index.snapshots.set(entry, snapshot);
+  return snapshot;
 }
 
-export function listeningHistoryEntryQualifiesAsPlay(state, entry) {
+export function listeningHistoryEntryQualifiesAsPlay(state, entry, index) {
   const listenedSeconds = Number(entry?.listenedSeconds);
   if (!Number.isFinite(listenedSeconds) || listenedSeconds <= 0) return false;
-  const duration = listeningHistoryTrackSnapshot(state, entry).duration;
+  const duration = listeningHistoryTrackSnapshot(state, entry, index).duration;
   return Number.isFinite(duration) && duration > 0 && listenedSeconds > duration * 0.1;
 }
 
@@ -1088,7 +1080,15 @@ export function trackBelongsToActiveProfile(state, track) {
 }
 
 export function tracksForActiveProfile(state) {
-  return (Array.isArray(state?.tracks) ? state.tracks : []).filter((track) => trackBelongsToActiveProfile(state, track));
+  const activeServer = normalizedServerOrigin(state?.serverURL);
+  const profileID = state?.syncProfileID || "default";
+  const sources = new Map();
+  return (Array.isArray(state?.tracks) ? state.tracks : []).filter((track) => {
+    if (!track?.remoteID) return true;
+    if (!activeServer || (track.syncProfileID || "default") !== profileID) return false;
+    if (!sources.has(track.sourceServer)) sources.set(track.sourceServer, normalizedServerOrigin(track.sourceServer));
+    return sources.get(track.sourceServer) === activeServer;
+  });
 }
 
 export function resolveSyncProfile(profiles, query, defaultProfileID = "default") {
@@ -1288,7 +1288,7 @@ function listeningHistoryEntryMatchesActiveProfile(state, entry) {
   return Boolean(entryServerOrigin && activeServerOrigin === entryServerOrigin);
 }
 
-export function summarizeListeningHistory(state, dayCount = 30, now = new Date(), windowOffset = 0) {
+export function summarizeListeningHistory(state, dayCount = 30, now = new Date(), windowOffset = 0, index = createListeningHistoryIndex(state)) {
   const requestedCount = Math.max(1, Math.min(365, Math.floor(Number(dayCount) || 30)));
   const offset = Math.max(0, Math.floor(Number(windowOffset) || 0));
   const hourly = requestedCount === 1;
@@ -1314,7 +1314,7 @@ export function summarizeListeningHistory(state, dayCount = 30, now = new Date()
     const timestamp = Date.parse(entry.startedAt);
     if (!Number.isFinite(timestamp)) continue;
     const seconds = Math.max(0, Number(entry.listenedSeconds) || 0);
-    const qualifiesAsPlay = listeningHistoryEntryQualifiesAsPlay(state, entry);
+    const qualifiesAsPlay = listeningHistoryEntryQualifiesAsPlay(state, entry, index);
     if (localDayKey(timestamp) === todayKey) {
       todaySeconds += seconds;
       if (qualifiesAsPlay) todayPlays += 1;
@@ -1326,7 +1326,7 @@ export function summarizeListeningHistory(state, dayCount = 30, now = new Date()
     if (qualifiesAsPlay) day.plays += 1;
     if (entry.trackID) {
       const songKey = listeningHistorySongKey(entry);
-      const snapshot = listeningHistoryTrackSnapshot(state, entry);
+      const snapshot = listeningHistoryTrackSnapshot(state, entry, index);
       songKeys.add(songKey);
       if (!songSeries.has(songKey)) {
         songSeries.set(songKey, {
@@ -1364,7 +1364,7 @@ export function summarizeListeningHistory(state, dayCount = 30, now = new Date()
   };
 }
 
-export function summarizeListeningStats(state, now = new Date()) {
+export function summarizeListeningStats(state, now = new Date(), index = createListeningHistoryIndex(state)) {
   const songs = new Map();
   const artists = new Map();
   const todayKey = localDayKey(now);
@@ -1377,14 +1377,14 @@ export function summarizeListeningStats(state, now = new Date()) {
     const timestamp = Date.parse(entry.startedAt);
     if (!Number.isFinite(timestamp)) continue;
     const seconds = Math.max(0, Number(entry.listenedSeconds) || 0);
-    const qualifiesAsPlay = listeningHistoryEntryQualifiesAsPlay(state, entry);
+    const qualifiesAsPlay = listeningHistoryEntryQualifiesAsPlay(state, entry, index);
     totalSeconds += seconds;
     if (qualifiesAsPlay) plays += 1;
     if (localDayKey(timestamp) === todayKey) todaySeconds += seconds;
     if (!entry.trackID) continue;
 
     const songKey = listeningHistorySongKey(entry);
-    const snapshot = listeningHistoryTrackSnapshot(state, entry);
+    const snapshot = listeningHistoryTrackSnapshot(state, entry, index);
     const song = songs.get(songKey) || {
       trackID: snapshot.id,
       remoteID: snapshot.remoteID,
@@ -1581,13 +1581,46 @@ export function filterTracks(tracks, query, mode = "all") {
   return filtered;
 }
 
+// Match Array.find's first result, including duplicate IDs.
+function indexFirstByID(items, key = (item) => item?.id) {
+  const index = new Map();
+  for (const item of items) {
+    const id = key(item);
+    if (id != null && !index.has(id)) index.set(id, item);
+  }
+  return index;
+}
+
+export function playbackTracksForIDs(state, ids, transientTracks = []) {
+  const tracksByID = indexFirstByID([
+    ...tracksForActiveProfile(state),
+    ...transientTracks.filter(Boolean),
+  ]);
+  return ids.map((id) => tracksByID.get(id)).filter(Boolean);
+}
+
+// Build once per synchronous render: state collections can mutate in place.
+export function createRendererModel(state, catalog = []) {
+  const activeTracks = tracksForActiveProfile(state);
+  return {
+    tracks: state.tracks,
+    catalog,
+    playlistTracks: new Map(),
+    activeTracks,
+    activeTrackSet: new Set(activeTracks),
+    tracksByID: indexFirstByID(state.tracks),
+    catalogByID: indexFirstByID(catalog, (song) => String(song?.id || "")),
+  };
+}
+
 export function filterPlaylists(playlists, tracks, query) {
   const value = String(query || "").trim().toLocaleLowerCase();
   if (!value) return [...playlists];
+  const tracksByID = indexFirstByID(tracks);
   return playlists.filter((playlist) => {
     if (String(playlist.name || "").toLocaleLowerCase().includes(value)) return true;
     return (playlist.trackIDs || []).some((trackID) => {
-      const track = tracks.find((item) => item.id === trackID);
+      const track = tracksByID.get(trackID);
       return [track?.title, track?.artist, track?.album].some((field) => String(field || "").toLocaleLowerCase().includes(value));
     });
   });
@@ -1613,18 +1646,24 @@ export function nextIndex(tracks, currentID, direction = 1) {
   return (current + (direction >= 0 ? 1 : -1) + tracks.length) % tracks.length;
 }
 
-export function tracksForPlaylist(state, playlistID, catalog = []) {
+export function tracksForPlaylist(state, playlistID, catalog = [], indexes = null) {
+  const cache = indexes?.tracks === state.tracks && indexes?.catalog === catalog ? indexes.playlistTracks : null;
+  if (cache?.has(playlistID)) return cache.get(playlistID);
   const playlist = state.playlists.find((item) => item.id === playlistID);
   if (!playlist) return [];
-  const localTracks = playlist.trackIDs.map((id) => state.tracks.find((track) => track.id === id)).filter(Boolean);
-  if (playlist.isSystem || !Array.isArray(playlist.remoteSongIDs)) return localTracks;
+  const tracksByID = indexes?.tracks === state.tracks ? indexes.tracksByID : indexFirstByID(state.tracks);
+  const localTracks = playlist.trackIDs.map((id) => tracksByID.get(id)).filter(Boolean);
+  if (playlist.isSystem || !Array.isArray(playlist.remoteSongIDs)) {
+    cache?.set(playlistID, localTracks);
+    return localTracks;
+  }
 
   const orderedRemoteIDs = unique(playlist.remoteSongIDs.map((id) => String(id || "").trim()).filter(Boolean));
   const remoteIDSet = new Set(orderedRemoteIDs);
   const downloadedByRemoteID = new Map();
   const fallbackPreviousKeys = localTracks.map((track) => {
     const remoteID = String(track?.remoteID || "").trim();
-    if (!remoteID || !remoteIDSet.has(remoteID) || !trackBelongsToActiveProfile(state, track)) {
+    if (!remoteID || !remoteIDSet.has(remoteID) || !(cache ? indexes.activeTrackSet.has(track) : trackBelongsToActiveProfile(state, track))) {
       return playlistLocalEntryKey(track.id);
     }
     if (!downloadedByRemoteID.has(remoteID)) downloadedByRemoteID.set(remoteID, track);
@@ -1637,13 +1676,13 @@ export function tracksForPlaylist(state, playlistID, catalog = []) {
     key.startsWith("local:") ? validLocalKeys.has(key) : validRemoteKeys.has(key));
   const previousKeys = unique([...storedPreviousKeys, ...fallbackPreviousKeys]);
   const preservedKeys = previousKeys.filter((key) => key.startsWith("local:"));
-  const catalogByID = new Map((Array.isArray(catalog) ? catalog : [])
-    .filter((song) => song?.id)
-    .map((song) => [String(song.id), song]));
+  const catalogByID = indexes?.catalog === catalog
+    ? indexes.catalogByID
+    : indexFirstByID(Array.isArray(catalog) ? catalog : [], (song) => String(song?.id || ""));
 
-  return mergePlaylistOrderWithPreservedItems(previousKeys, orderedKeys, preservedKeys).map((key) => {
+  const result = mergePlaylistOrderWithPreservedItems(previousKeys, orderedKeys, preservedKeys).map((key) => {
     if (key.startsWith("local:")) {
-      return state.tracks.find((track) => track.id === key.slice("local:".length));
+      return tracksByID.get(key.slice("local:".length));
     }
     const remoteID = key.slice("remote:".length);
     const downloaded = downloadedByRemoteID.get(remoteID);
@@ -1665,6 +1704,8 @@ export function tracksForPlaylist(state, playlistID, catalog = []) {
       playlistUnavailable: true,
     };
   }).filter(Boolean);
+  cache?.set(playlistID, result);
+  return result;
 }
 
 function playlistLocalEntryKey(trackID) {
@@ -1684,9 +1725,9 @@ export function normalizedPlaylistEntryOrder(value) {
       || (key.startsWith("remote:") && key.length > "remote:".length)));
 }
 
-export function playlistEntryKey(playlist, track) {
+export function playlistEntryKey(playlist, track, remoteIDs = null) {
   const remoteID = String(track?.remoteID || "").trim();
-  if (remoteID && Array.isArray(playlist?.remoteSongIDs) && playlist.remoteSongIDs.includes(remoteID)) {
+  if (remoteID && (remoteIDs ? remoteIDs.has(remoteID) : Array.isArray(playlist?.remoteSongIDs) && playlist.remoteSongIDs.includes(remoteID))) {
     return playlistRemoteEntryKey(remoteID);
   }
   return playlistLocalEntryKey(track?.id);
@@ -1827,8 +1868,9 @@ export function mergePlaylistOrderWithPreservedItems(previousIDs, orderedIDs, pr
   const previous = unique(Array.isArray(previousIDs) ? previousIDs : []);
   const ordered = unique(Array.isArray(orderedIDs) ? orderedIDs : []);
   const orderedSet = new Set(ordered);
+  const previousSet = new Set(previous);
   const preserved = new Set(unique(Array.isArray(preservedIDs) ? preservedIDs : [])
-    .filter((id) => previous.includes(id) && !orderedSet.has(id)));
+    .filter((id) => previousSet.has(id) && !orderedSet.has(id)));
   const merged = [];
   let orderedIndex = 0;
 
@@ -2351,11 +2393,11 @@ export function formatServerUploadFailureNotice(failures) {
 }
 
 export function updatePlaylistRemoteSongIDs(state, playlist) {
-  const unresolved = (playlist.remoteSongIDs || []).filter((remoteID) =>
-    !state.tracks.some((track) => track.remoteID === remoteID && trackBelongsToActiveProfile(state, track)));
-  const downloaded = playlist.trackIDs
-    .map((trackID) => state.tracks.find((track) => track.id === trackID && trackBelongsToActiveProfile(state, track))?.remoteID)
-    .filter(Boolean);
+  const activeTracks = tracksForActiveProfile(state);
+  const tracksByID = indexFirstByID(activeTracks);
+  const remoteIDs = new Set(activeTracks.map((track) => track.remoteID));
+  const unresolved = (playlist.remoteSongIDs || []).filter((remoteID) => !remoteIDs.has(remoteID));
+  const downloaded = playlist.trackIDs.map((trackID) => tracksByID.get(trackID)?.remoteID).filter(Boolean);
   playlist.remoteSongIDs = mergePlaylistOrderWithPreservedItems(
     playlist.remoteSongIDs,
     downloaded,
@@ -2365,13 +2407,15 @@ export function updatePlaylistRemoteSongIDs(state, playlist) {
 }
 
 export function hydrateRemotePlaylistTracks(state) {
+  const tracksByID = indexFirstByID(state.tracks);
+  const tracksByRemoteID = indexFirstByID(tracksForActiveProfile(state), (track) => track.remoteID);
   for (const playlist of state.playlists.filter((item) => !item.isSystem && Array.isArray(item.remoteSongIDs))) {
     const localOnly = playlist.trackIDs.filter((trackID) => {
-      const track = state.tracks.find((item) => item.id === trackID);
+      const track = tracksByID.get(trackID);
       return track && !track.remoteID;
     });
     const downloaded = playlist.remoteSongIDs
-      .map((remoteID) => state.tracks.find((track) => track.remoteID === remoteID && trackBelongsToActiveProfile(state, track))?.id)
+      .map((remoteID) => tracksByRemoteID.get(remoteID)?.id)
       .filter(Boolean);
     playlist.trackIDs = mergePlaylistOrderWithPreservedItems(
       playlist.trackIDs,
@@ -2383,20 +2427,22 @@ export function hydrateRemotePlaylistTracks(state) {
 }
 
 export function hydrateRemoteLikedTracks(state) {
+  const tracksByID = indexFirstByID(state.tracks);
+  const activeTracks = tracksForActiveProfile(state);
   const likedRemoteIDs = new Set(state.remoteLikedSongIDs);
   const localFavorites = state.favorites.filter((trackID) => {
-    const track = state.tracks.find((item) => item.id === trackID);
+    const track = tracksByID.get(trackID);
     return track && !track.remoteID;
   });
-  const remoteFavorites = state.tracks
+  const remoteFavorites = activeTracks
     .filter((track) =>
       track.remoteID
-      && trackBelongsToActiveProfile(state, track)
       && likedRemoteIDs.has(track.remoteID))
     .map((track) => track.id);
   state.favorites = unique([...localFavorites, ...remoteFavorites]);
+  const favorites = new Set(state.favorites);
   const system = state.playlists.find((playlist) => playlist.isSystem);
-  if (system) system.trackIDs = tracksForActiveProfile(state).map((track) => track.id).filter((id) => state.favorites.includes(id));
+  if (system) system.trackIDs = activeTracks.map((track) => track.id).filter((id) => favorites.has(id));
   return state;
 }
 

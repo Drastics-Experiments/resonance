@@ -1296,10 +1296,18 @@ enum MobileListeningHistoryPolicy {
     }
 
     static func bounded(_ entries: [MobileListeningHistoryEntry]) -> [MobileListeningHistoryEntry] {
-        Array(entries.sorted { lhs, rhs in
+        guard entries.count > 1 else { return entries }
+        func precedes(_ lhs: MobileListeningHistoryEntry, _ rhs: MobileListeningHistoryEntry) -> Bool {
             if lhs.startedAt == rhs.startedAt { return lhs.id.uuidString < rhs.id.uuidString }
             return lhs.startedAt < rhs.startedAt
-        }.suffix(maximumEntries))
+        }
+        let isOrdered = zip(entries, entries.dropFirst()).allSatisfy { !precedes($0.1, $0.0) }
+        if isOrdered {
+            return entries.count > maximumEntries
+                ? Array(entries.suffix(maximumEntries))
+                : entries
+        }
+        return Array(entries.sorted(by: precedes).suffix(maximumEntries))
     }
 
     static func batches<T>(_ values: [T]) -> [[T]] {
@@ -1355,23 +1363,31 @@ enum MobileListeningHistoryPolicy {
         let activeOrigin = normalizedOrigin(origin)
         guard document.profileID == profileID, let activeOrigin else { return bounded(localEntries) }
         let context = MobileServerContext(origin: activeOrigin, profileID: profileID)
-        let activeRemoteTracks = Dictionary(uniqueKeysWithValues: tracks.compactMap { track -> (String, MobileTrack)? in
+        // Use first-wins maps here. Catalog and history data can come from older
+        // clients or a partially migrated library, where duplicate identifiers
+        // should be ignored rather than crashing Dictionary's strict initializer.
+        let activeRemoteTracks = tracks.reduce(into: [String: MobileTrack]()) { result, track in
             guard let remoteID = nonempty(track.remoteID, maximum: 128),
-                  track.remoteIdentity()?.context == context else { return nil }
-            return (remoteID, track)
-        })
-        let activeTracksByID = Dictionary(uniqueKeysWithValues: tracks.compactMap { track -> (UUID, MobileTrack)? in
-            guard track.remoteID == nil || track.remoteIdentity()?.context == context else { return nil }
-            return (track.id, track)
-        })
-        let activeCatalogByID = Dictionary(uniqueKeysWithValues: catalog.map { ($0.id, $0) })
+                  track.remoteIdentity()?.context == context,
+                  result[remoteID] == nil else { return }
+            result[remoteID] = track
+        }
+        let activeTracksByID = tracks.reduce(into: [UUID: MobileTrack]()) { result, track in
+            guard track.remoteID == nil || track.remoteIdentity()?.context == context,
+                  result[track.id] == nil else { return }
+            result[track.id] = track
+        }
+        let activeCatalogByID = Dictionary(catalog.lazy.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let isActiveEntry: (MobileListeningHistoryEntry) -> Bool = { entry in
             normalizedOrigin(entry.serverOrigin) == activeOrigin
                 && (entry.syncProfileID ?? "default") == profileID
                 && (entry.accountID == nil || entry.accountID == accountID)
         }
         let otherContextEntries = localEntries.filter { !isActiveEntry($0) }
-        var activeByID = Dictionary(uniqueKeysWithValues: localEntries.filter(isActiveEntry).map { ($0.id, $0) })
+        var activeByID = localEntries.reduce(into: [UUID: MobileListeningHistoryEntry]()) { result, entry in
+            guard isActiveEntry(entry), result[entry.id] == nil else { return }
+            result[entry.id] = entry
+        }
 
         for remote in document.entries {
             guard let eventID = UUID(uuidString: remote.id),
@@ -1452,18 +1468,29 @@ enum MobileListeningHistoryPolicy {
     }
 
     static func timestamp(_ date: Date) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.string(from: date)
+        formatterLock.lock()
+        defer { formatterLock.unlock() }
+        return fractionalDateFormatter.string(from: date)
     }
 
     static func date(from value: String) -> Date? {
+        formatterLock.lock()
+        defer { formatterLock.unlock() }
+        if let date = fractionalDateFormatter.date(from: value) { return date }
+        return secondsDateFormatter.date(from: value)
+    }
+
+    private static let formatterLock = NSLock()
+    private static let fractionalDateFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: value) { return date }
+        return formatter
+    }()
+    private static let secondsDateFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: value)
-    }
+        return formatter
+    }()
 
     private static func validDuration(_ value: TimeInterval) -> TimeInterval? {
         guard value.isFinite, value > 0 else { return nil }
@@ -1529,7 +1556,8 @@ enum MobileRemoteSongMetadataCachePolicy {
         }
         .sorted { $0.1.cachedAt > $1.1.cachedAt }
         .prefix(limit)
-        return Dictionary(uniqueKeysWithValues: entries)
+        // Canonicalized legacy keys can collide; the sorted entries put the newest first.
+        return Dictionary(entries, uniquingKeysWith: { first, _ in first })
     }
 
     private static func boundedHTTPSURL(_ value: String?) -> String? {
@@ -1661,6 +1689,29 @@ enum MobileCollectionNormalization {
     static func uniqueRemotePlaylists(_ playlists: [MobileRemotePlaylist]) -> [MobileRemotePlaylist] {
         var seen = Set<UUID>()
         return playlists.filter { seen.insert($0.id).inserted }
+    }
+}
+
+/// First-wins lookups preserve array order when legacy track identifiers collide.
+enum MobileTrackCollectionPolicy {
+    static func index(_ tracks: [MobileTrack]) -> [UUID: MobileTrack] {
+        Dictionary(tracks.lazy.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    static func ordered(_ ids: [UUID], from tracks: [MobileTrack]) -> [MobileTrack] {
+        let tracksByID = index(tracks)
+        return ids.compactMap { tracksByID[$0] }
+    }
+
+    static func belongingToServerContext(
+        _ tracks: [MobileTrack],
+        context: MobileServerContext?
+    ) -> [MobileTrack] {
+        tracks.filter { track in
+            guard track.remoteID != nil else { return true }
+            guard let context else { return false }
+            return track.remoteIdentity()?.context == context
+        }
     }
 }
 
@@ -2511,16 +2562,22 @@ enum MobilePlaybackSnapshotPolicy {
             return MobilePlaybackRestoreResult(queue: [], playlistID: nil, currentTrackID: nil)
         }
 
+        let tracksByID = MobileTrackCollectionPolicy.index(tracks)
+        let tracksByRemoteIdentity = tracks.reduce(into: [MobileRemoteIdentity: MobileTrack]()) { result, track in
+            guard activeTrackIDs.contains(track.id),
+                  let identity = track.remoteIdentity(),
+                  result[identity] == nil else { return }
+            result[identity] = track
+        }
+
         func resolvedID(for reference: MobilePlaybackQueueReference) -> UUID? {
             if activeTrackIDs.contains(reference.trackID),
-               let track = tracks.first(where: { $0.id == reference.trackID }),
+               let track = tracksByID[reference.trackID],
                reference.remoteIdentity == nil || track.remoteIdentity() == reference.remoteIdentity {
                 return reference.trackID
             }
             guard let remoteIdentity = reference.remoteIdentity else { return nil }
-            return tracks.first {
-                activeTrackIDs.contains($0.id) && $0.remoteIdentity() == remoteIdentity
-            }?.id
+            return tracksByRemoteIdentity[remoteIdentity]?.id
         }
 
         var seen = Set<UUID>()

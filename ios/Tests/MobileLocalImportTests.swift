@@ -465,6 +465,49 @@ final class MobileLocalImportTests: XCTestCase {
         )
     }
 
+    func testTrackContextFilteringKeepsReusedRemoteIDsScopedToTheirProfile() throws {
+        let activeContext = try XCTUnwrap(
+            MobileServerEndpointPolicy.context(
+                serverURL: try XCTUnwrap(URL(string: "https://music.example")),
+                profileID: "profile-a"
+            )
+        )
+        let localID = UUID()
+        let activeID = UUID()
+        let otherProfileID = UUID()
+        let local = MobileTrack(
+            id: localID,
+            title: "Local",
+            duration: 1,
+            relativePath: "local.m4a"
+        )
+        let active = MobileTrack(
+            id: activeID,
+            title: "Active",
+            duration: 1,
+            relativePath: "active.m4a",
+            remoteID: "reused-song",
+            sourceServer: "https://music.example",
+            syncProfileID: "profile-a"
+        )
+        let otherProfile = MobileTrack(
+            id: otherProfileID,
+            title: "Other profile",
+            duration: 1,
+            relativePath: "other.m4a",
+            remoteID: "reused-song",
+            sourceServer: "https://music.example",
+            syncProfileID: "profile-b"
+        )
+
+        let filtered = MobileTrackCollectionPolicy.belongingToServerContext(
+            [local, active, otherProfile],
+            context: activeContext
+        )
+
+        XCTAssertEqual(filtered.map(\.id), [localID, activeID])
+    }
+
     private func playlistItem(position: Int, trackID: String) -> LocalImportPlaylistItem {
         let sourceURL = "https://www.youtube.com/watch?v=video\(position)"
         let track = LocalImportSpotifyTrack(

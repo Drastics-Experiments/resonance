@@ -49,6 +49,7 @@ enum MobileRemoteMetadataRetryPolicy {
 actor MobileAsyncSerialGate {
     private var isHeld = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var waiterHead = 0
 
     func acquire() async {
         if !isHeld {
@@ -61,11 +62,22 @@ actor MobileAsyncSerialGate {
     }
 
     func release() {
-        guard !waiters.isEmpty else {
+        guard waiterHead < waiters.count else {
             isHeld = false
+            waiters.removeAll(keepingCapacity: true)
+            waiterHead = 0
             return
         }
-        waiters.removeFirst().resume()
+        let waiter = waiters[waiterHead]
+        waiterHead += 1
+        waiter.resume()
+
+        // Avoid the O(n) removeFirst cost when many transfers are queued while
+        // retaining a small amount of capacity for the next burst.
+        if waiterHead >= 64, waiterHead * 2 >= waiters.count {
+            waiters.removeFirst(waiterHead)
+            waiterHead = 0
+        }
     }
 }
 
@@ -642,7 +654,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         case policyChanged
         case cancelled
     }
-    @Published var tracks: [MobileTrack] = []
+    @Published var tracks: [MobileTrack] = [] {
+        didSet {
+            trackIndexesNeedRebuild = true
+            invalidateDerivedTrackCaches()
+        }
+    }
     @Published var playlists: [MobilePlaylist] = [MobilePlaylist(name: "Liked Songs", isSystem: true)]
     @Published var favorites: Set<UUID> = []
     @Published var currentTrackID: UUID?
@@ -693,10 +710,17 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             )
         }
     }
-    @Published var searchText = ""
+    @Published var searchText = "" {
+        didSet { filteredTracksCache = nil }
+    }
     @Published private(set) var isRefreshingDownloadedMetadata = false
     @Published private(set) var downloadedMetadataRefreshDetail = "Refresh titles, artists, albums, and artwork from saved source links."
-    @Published private(set) var serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site"
+    @Published private(set) var serverURL = "https://resonance-core.blithe-haven-9710.chatgpt.site" {
+        didSet {
+            invalidateDerivedTrackCaches()
+            invalidateRemoteNowPlayingArtworkCache()
+        }
+    }
     @Published private(set) var serverToken = ""
     @Published private(set) var serverAdminToken = ""
     @Published private(set) var accountEmail: String?
@@ -724,7 +748,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     @Published private(set) var serverConfigurationMessage: String?
     @Published var isSyncingPlaylists = false
     @Published var playlistSyncDetail = "Not synced"
-    @Published var syncProfileID = "default"
+    @Published var syncProfileID = "default" {
+        didSet {
+            invalidateDerivedTrackCaches()
+            invalidateRemoteNowPlayingArtworkCache()
+        }
+    }
     @Published var syncProfileName = "Default"
     @Published private(set) var isActivatingSyncProfile = false
     @Published private(set) var clientFeatureConfiguration = MobileClientFeatureConfiguration.safeDefaults
@@ -814,10 +843,20 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var history: [UUID] = []
     private var playbackQueue: [UUID] = []
     private var playbackPlaylistID: UUID?
-    private var artworkCache: [String: UIImage] = [:]
+    private let artworkCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 256
+        cache.totalCostLimit = 64 * 1_024 * 1_024
+        return cache
+    }()
     private var nowPlayingArtworkCacheKey: String?
     private var nowPlayingArtworkCache: MPMediaItemArtwork?
-    private var remoteNowPlayingArtworkCache: [String: UIImage] = [:]
+    private let remoteNowPlayingArtworkCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 32
+        cache.totalCostLimit = 32 * 1_024 * 1_024
+        return cache
+    }()
     private var nowPlayingArtworkLoadTask: Task<Void, Never>?
     private var nowPlayingArtworkLoadRemoteID: String?
     private var remoteCommandTargets: [(command: MPRemoteCommand, target: Any)] = []
@@ -888,6 +927,12 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         var duration: TimeInterval?
         var artworkData: Data?
     }
+
+    private var trackIndexByID: [UUID: Int] = [:]
+    private var remoteTrackIDsByContext: [MobileServerContext: Set<String>] = [:]
+    private var trackIndexesNeedRebuild = true
+    private var activeTracksCache: [MobileTrack]?
+    private var filteredTracksCache: [MobileTrack]?
 
     override init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -1201,9 +1246,50 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         save()
     }
 
+    private func ensureTrackIndexes() {
+        guard trackIndexesNeedRebuild else { return }
+        trackIndexByID.removeAll(keepingCapacity: true)
+        remoteTrackIDsByContext.removeAll(keepingCapacity: true)
+        trackIndexByID.reserveCapacity(tracks.count)
+
+        for (index, track) in tracks.enumerated() {
+            // Collection normalization keeps identifiers unique, but first-wins
+            // makes this index safe during recovery and while an older library
+            // is being repaired.
+            if trackIndexByID[track.id] == nil {
+                trackIndexByID[track.id] = index
+            }
+            guard let remoteID = track.remoteID,
+                  !remoteID.isEmpty,
+                  let context = track.remoteIdentity()?.context else { continue }
+            remoteTrackIDsByContext[context, default: []].insert(remoteID)
+        }
+        trackIndexesNeedRebuild = false
+    }
+
+    private func invalidateDerivedTrackCaches() {
+        activeTracksCache = nil
+        filteredTracksCache = nil
+    }
+
+    private func invalidateRemoteNowPlayingArtworkCache() {
+        remoteNowPlayingArtworkCache.removeAllObjects()
+        nowPlayingArtworkCacheKey = nil
+        nowPlayingArtworkCache = nil
+    }
+
+    private func storedTrack(withID id: UUID) -> MobileTrack? {
+        trackIndex(for: id).map { tracks[$0] }
+    }
+
+    private func trackIndex(for id: UUID) -> Int? {
+        ensureTrackIndexes()
+        return trackIndexByID[id]
+    }
+
     var currentTrack: MobileTrack? {
         guard let currentTrackID else { return nil }
-        return tracks.first { $0.id == currentTrackID }
+        return storedTrack(withID: currentTrackID)
             ?? streamingTrack.flatMap { $0.id == currentTrackID ? $0 : nil }
     }
 
@@ -1942,17 +2028,31 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     var tracksForActiveProfile: [MobileTrack] {
-        tracks.filter(belongsToActiveServerContext)
+        if let activeTracksCache { return activeTracksCache }
+        let resolved = MobileTrackCollectionPolicy.belongingToServerContext(
+            tracks,
+            context: activeServerContext
+        )
+        activeTracksCache = resolved
+        return resolved
     }
 
     var filteredTracks: [MobileTrack] {
+        if let filteredTracksCache { return filteredTracksCache }
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return tracksForActiveProfile }
-        return tracksForActiveProfile.filter {
-            $0.title.localizedCaseInsensitiveContains(query)
+        let activeTracks = tracksForActiveProfile
+        let resolved: [MobileTrack]
+        if query.isEmpty {
+            resolved = activeTracks
+        } else {
+            resolved = activeTracks.filter {
+                $0.title.localizedCaseInsensitiveContains(query)
                 || $0.artist.localizedCaseInsensitiveContains(query)
                 || $0.album.localizedCaseInsensitiveContains(query)
+            }
         }
+        filteredTracksCache = resolved
+        return resolved
     }
 
     func fileURL(for track: MobileTrack) -> URL {
@@ -1961,11 +2061,18 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     func artwork(for track: MobileTrack) -> UIImage? {
         guard let filename = track.artworkFilename else { return nil }
-        if let cached = artworkCache[filename] { return cached }
+        let cacheKey = filename as NSString
+        if let cached = artworkCache.object(forKey: cacheKey) { return cached }
         guard let image = UIImage(contentsOfFile: artworkDirectory.appendingPathComponent(filename).path) else { return nil }
         let squareImage = centerCroppedSquare(image)
-        artworkCache[filename] = squareImage
+        artworkCache.setObject(squareImage, forKey: cacheKey, cost: artworkCacheCost(squareImage))
         return squareImage
+    }
+
+    private func artworkCacheCost(_ image: UIImage) -> Int {
+        guard let cgImage = image.cgImage else { return 1 }
+        let (cost, overflow) = cgImage.bytesPerRow.multipliedReportingOverflow(by: cgImage.height)
+        return overflow ? Int.max : max(cost, 1)
     }
 
     private func centerCroppedSquare(_ image: UIImage) -> UIImage {
@@ -2115,7 +2222,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             do {
                 try fileManager.copyItem(at: source, to: destination)
                 let audio = try AVAudioPlayer(contentsOf: destination)
-                let metadata = await embeddedMetadata(at: destination)
+                let metadata = await embeddedMetadata(
+                    at: destination,
+                    playableDuration: audio.duration
+                )
                 let trackID = UUID()
                 tracks.append(MobileTrack(
                     id: trackID,
@@ -2580,7 +2690,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             if let measuredDuration = MobilePlayableMediaDurationPolicy.preferred(
                 storedDuration: track.duration,
                 playableDurations: [next.duration]
-            ), let trackIndex = tracks.firstIndex(where: { $0.id == track.id }),
+            ), let trackIndex = trackIndex(for: track.id),
                abs(tracks[trackIndex].duration - measuredDuration) > 0.25 {
                 tracks[trackIndex].duration = measuredDuration
             }
@@ -2830,11 +2940,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private var activeQueue: [MobileTrack] {
         var playableTracks = tracksForActiveProfile
         if let streamingTrack { playableTracks.append(streamingTrack) }
-        let activeTrackIDs = Set(playableTracks.map(\.id))
-        let queuedTracks: [MobileTrack] = playbackQueue.compactMap { id in
-            guard activeTrackIDs.contains(id) else { return nil }
-            return playableTracks.first { $0.id == id }
-        }
+        let playableTracksByID = MobileTrackCollectionPolicy.index(playableTracks)
+        let queuedTracks = playbackQueue.compactMap { playableTracksByID[$0] }
         if playbackPlaylistID != nil { return queuedTracks }
         return queuedTracks.isEmpty ? playableTracks : queuedTracks
     }
@@ -3013,7 +3120,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     func tracks(in playlist: MobilePlaylist) -> [MobileTrack] {
-        playlist.trackIDs.compactMap { id in tracks.first { $0.id == id } }
+        MobileTrackCollectionPolicy.ordered(playlist.trackIDs, from: tracks)
     }
 
     func playlistEntries(in playlist: MobilePlaylist) -> [MobilePlaylistPresentationEntry] {
@@ -3064,7 +3171,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         try? fileManager.removeItem(at: fileURL(for: track))
         if let artworkFilename = track.artworkFilename {
             try? fileManager.removeItem(at: artworkDirectory.appendingPathComponent(artworkFilename))
-            artworkCache.removeValue(forKey: artworkFilename)
+            artworkCache.removeObject(forKey: artworkFilename as NSString)
         }
         tracks.removeAll { $0.id == track.id }
         playbackQueue.removeAll { $0 == track.id }
@@ -3313,8 +3420,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
 
     func isSynced(_ song: MobileRemoteSong) -> Bool {
         guard let activeServerContext else { return false }
-        let expected = MobileRemoteIdentity(context: activeServerContext, remoteID: song.id)
-        return tracks.contains { $0.remoteIdentity() == expected }
+        ensureTrackIndexes()
+        return remoteTrackIDsByContext[activeServerContext]?.contains(song.id) == true
     }
 
     private func syncCatalog() async {
@@ -4371,7 +4478,8 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         for index in tracks.indices {
             let track = tracks[index]
             let mediaURL = fileURL(for: track)
-            if let playableDuration = (try? AVAudioPlayer(contentsOf: mediaURL))?.duration,
+            let playableDuration = (try? AVAudioPlayer(contentsOf: mediaURL))?.duration
+            if let playableDuration,
                let resolvedDuration = MobilePlayableMediaDurationPolicy.preferred(
                     storedDuration: track.duration,
                     playableDurations: [playableDuration]
@@ -4380,7 +4488,10 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 changed = true
             }
             guard needsMetadataRefresh(track) else { continue }
-            let metadata = await embeddedMetadata(at: mediaURL)
+            let metadata = await embeddedMetadata(
+                at: mediaURL,
+                playableDuration: playableDuration
+            )
             if let title = metadata.title, title != tracks[index].title {
                 tracks[index].title = title
                 changed = true
@@ -4502,11 +4613,14 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 + (sourceFailures == 1 ? "" : "es") + " failed."
     }
 
-    private func embeddedMetadata(at url: URL) async -> EmbeddedMetadata {
+    private func embeddedMetadata(
+        at url: URL,
+        playableDuration: TimeInterval? = nil
+    ) async -> EmbeddedMetadata {
         let asset = AVURLAsset(url: url)
         let items = (try? await asset.load(.commonMetadata)) ?? []
         let duration = try? await asset.load(.duration)
-        let playableDuration = (try? AVAudioPlayer(contentsOf: url))?.duration
+        let resolvedPlayableDuration = playableDuration ?? (try? AVAudioPlayer(contentsOf: url))?.duration
         let title = await metadataString(.commonKeyTitle, in: items)
         let artist = await metadataString(.commonKeyArtist, in: items)
         let author = await metadataString(.commonKeyAuthor, in: items)
@@ -4518,7 +4632,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             album: album,
             duration: MobilePlayableMediaDurationPolicy.preferred(
                 storedDuration: duration.map(CMTimeGetSeconds),
-                playableDurations: [playableDuration]
+                playableDurations: [resolvedPlayableDuration]
             ),
             artworkData: artwork
         )
@@ -4542,7 +4656,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         let filename = trackID.uuidString + ".artwork"
         do {
             try safeData.write(to: artworkDirectory.appendingPathComponent(filename), options: .atomic)
-            artworkCache.removeValue(forKey: filename)
+            artworkCache.removeObject(forKey: filename as NSString)
             return filename
         } catch {
             return nil
@@ -7152,7 +7266,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
         pruneListeningHistorySyncState()
         captureActiveProfileState()
         let queueReferences = playbackQueue.compactMap { trackID -> MobilePlaybackQueueReference? in
-            guard let track = tracks.first(where: { $0.id == trackID }) else { return nil }
+            guard let track = storedTrack(withID: trackID) else { return nil }
             return MobilePlaybackQueueReference(trackID: track.id, remoteIdentity: track.remoteIdentity())
         }
         let currentReference = currentTrack.flatMap { track -> MobilePlaybackQueueReference? in
@@ -7160,7 +7274,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
             return MobilePlaybackQueueReference(trackID: track.id, remoteIdentity: track.remoteIdentity())
         }
         let historyReferences = history.compactMap { trackID -> MobilePlaybackQueueReference? in
-            guard let track = tracks.first(where: { $0.id == trackID }) else { return nil }
+            guard let track = storedTrack(withID: trackID) else { return nil }
             return MobilePlaybackQueueReference(trackID: track.id, remoteIdentity: track.remoteIdentity())
         }
         let playbackSnapshot = MobilePlaybackSnapshot(
@@ -7867,7 +7981,9 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     }
 
     private func nowPlayingArtwork(for track: MobileTrack) -> MPMediaItemArtwork {
-        let remoteArtwork = track.remoteID.flatMap { remoteNowPlayingArtworkCache[$0] }
+        let remoteArtwork = track.remoteID.flatMap {
+            remoteNowPlayingArtworkCache.object(forKey: $0 as NSString)
+        }
         let sourceArtwork = artwork(for: track) ?? remoteArtwork
         let sourceKey = track.artworkFilename
             ?? (remoteArtwork == nil ? "fallback" : "remote:\(track.remoteID ?? "")")
@@ -7889,7 +8005,7 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
     private func scheduleNowPlayingArtworkLoad(for track: MobileTrack) {
         guard artwork(for: track) == nil,
               let remoteID = track.remoteID,
-              remoteNowPlayingArtworkCache[remoteID] == nil,
+              remoteNowPlayingArtworkCache.object(forKey: remoteID as NSString) == nil,
               let song = remoteSongs.first(where: { $0.id == remoteID }),
               song.artworkURL != nil,
               let baseURL = normalizedServer() else {
@@ -7919,7 +8035,11 @@ final class MusicLibrary: NSObject, ObservableObject, @preconcurrency AVAudioPla
                 try Task.checkCancellation()
                 guard let image = MobileArtworkImagePolicy.image(from: data),
                       self.currentTrack?.remoteID == remoteID else { return }
-                self.remoteNowPlayingArtworkCache = [remoteID: image]
+                self.remoteNowPlayingArtworkCache.setObject(
+                    image,
+                    forKey: remoteID as NSString,
+                    cost: self.artworkCacheCost(image)
+                )
                 self.nowPlayingArtworkCacheKey = nil
                 self.nowPlayingArtworkCache = nil
                 self.updateNowPlaying()

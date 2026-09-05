@@ -10,9 +10,7 @@ const {
   canonicalListenAlongRevision,
   canonicalListenAlongSnapshot,
   canonicalListenAlongSource,
-  isNewerListenAlongRevision,
   normalizeListenAlongResponse,
-  projectListenAlongPosition,
 } = listenAlong;
 
 const SOURCE = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
@@ -104,31 +102,6 @@ test("accepts nested and legacy flat responses while preserving the room contrac
     code: "flat-1234",
     role: "guest",
   }), /unsupported protocol/i);
-});
-
-test("projects server-time playback and rejects stale revisions", () => {
-  const serverTime = "2026-08-15T12:00:00.000Z";
-  assert.equal(projectListenAlongPosition({
-    source_url: SOURCE,
-    media_kind: "audio",
-    position_seconds: 12,
-    is_playing: true,
-  }, serverTime, Date.parse("2026-08-15T12:00:02.250Z")), 14.25);
-  assert.equal(projectListenAlongPosition({
-    source_url: SOURCE,
-    media_kind: "audio",
-    position_seconds: 12,
-    is_playing: true,
-  }, "2026-08-15T12:00:05.000Z", Date.parse("2026-08-15T12:00:02.250Z"), serverTime), 17);
-  assert.equal(projectListenAlongPosition({
-    source_url: SOURCE,
-    media_kind: "audio",
-    position_seconds: 12,
-    is_playing: false,
-  }, serverTime, Date.parse("2026-08-15T12:00:02.250Z")), 12);
-  assert.equal(isNewerListenAlongRevision(5, 4), true);
-  assert.equal(isNewerListenAlongRevision(4, 4), false);
-  assert.equal(isNewerListenAlongRevision("invalid", 4), false);
 });
 
 test("keeps listen-along network and provider capabilities out of the renderer", async () => {

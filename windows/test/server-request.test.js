@@ -79,6 +79,54 @@ test("stops after the authenticated redirect hop limit", async () => {
   assert.equal(calls, MAX_SERVER_REDIRECTS + 1);
 });
 
+test("redirects retain method and body semantics without mutating caller headers", async () => {
+  for (const status of [301, 302, 303, 307, 308]) {
+    for (const method of ["POST", "PUT", "GET", "HEAD"]) {
+      const headers = new Headers({ "Content-Type": "text/plain", "Content-Length": "7" });
+      const body = ["GET", "HEAD"].includes(method) ? undefined : "payload";
+      const calls = [];
+      let cancelled = 0;
+      await fetchSameOrigin("https://music.example", "/start", { method, headers, body }, {
+        fetchImpl: async (_url, options) => {
+          calls.push(options);
+          return calls.length === 1
+            ? new Response(new ReadableStream({ cancel() { cancelled += 1; } }), { status, headers: { location: "/next" } })
+            : new Response(null);
+        },
+      });
+      const rewritten = status <= 303 && !["GET", "HEAD"].includes(method);
+      assert.equal(calls[1].method, rewritten ? "GET" : method);
+      assert.equal(calls[1].body, rewritten ? undefined : body);
+      assert.equal(calls[1].headers.get("content-type"), rewritten ? null : "text/plain");
+      assert.equal(calls[1].headers.get("content-length"), rewritten ? null : "7");
+      assert.equal(headers.get("content-type"), "text/plain");
+      assert.equal(cancelled, 1);
+    }
+  }
+});
+
+test("rejected redirects cancel their bodies even when cancellation fails", async () => {
+  for (const [location, message] of [
+    [null, /without a Location/],
+    ["http://[", /unsafe redirect/],
+    ["https://user:password@music.example/next", /unsafe redirect/],
+    ["https://other.example/next", /cross-origin redirect/],
+  ]) {
+    let calls = 0;
+    let cancelled = 0;
+    await assert.rejects(fetchSameOrigin("https://music.example", "/start", {}, {
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response(new ReadableStream({
+          cancel() { cancelled += 1; throw new Error("Cancellation failed"); },
+        }), { status: 302, headers: location ? { location } : {} });
+      },
+    }), message);
+    assert.equal(calls, 1);
+    assert.equal(cancelled, 1);
+  }
+});
+
 test("main and social-auth do not retain independent authenticated fetch paths", async () => {
   const { readFile } = await import("node:fs/promises");
   const [mainSource, authSource, debridSource] = await Promise.all([

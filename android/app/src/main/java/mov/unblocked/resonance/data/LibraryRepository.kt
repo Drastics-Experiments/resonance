@@ -7,6 +7,7 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.StatFs
 import android.provider.OpenableColumns
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -44,7 +45,9 @@ class LibraryRepository(
             } else {
                 try {
                     json.decodeFromString<StoredLibrary>(stateFile.readText())
-                } catch (_: Throwable) {
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
                     // A corrupt state file cannot safely tell us which media is still owned.
                     // Keep every file in place so recovery remains possible.
                     return@withLock normalize(StoredLibrary())
@@ -62,16 +65,21 @@ class LibraryRepository(
 
     suspend fun save(library: StoredLibrary) = withContext(Dispatchers.IO) {
         stateMutex.withLock {
-            writeState(normalize(library))
+            // File ownership is reconciled on load. Saves are frequent (likes, playlist edits,
+            // playback history), so avoid an O(track count) stat for every state-only mutation.
+            // The next load still removes missing tracks and app-owned orphans safely.
+            writeState(normalize(library, verifyFiles = false))
         }
     }
 
     private fun writeState(library: StoredLibrary) {
         rootDirectory.mkdirs()
         val temporary = File(rootDirectory, "${stateFile.name}.tmp")
-        FileOutputStream(temporary).bufferedWriter(Charsets.UTF_8).use { writer ->
-            writer.write(json.encodeToString(library))
-            writer.flush()
+        FileOutputStream(temporary).use { output ->
+            output.write(json.encodeToString(library).toByteArray(Charsets.UTF_8))
+            // Ensure a successfully completed save is durable before replacing the prior state.
+            // This matters after process death during frequent playlist/like writes.
+            output.fd.sync()
         }
         if (!temporary.renameTo(stateFile)) {
             temporary.copyTo(stateFile, overwrite = true)
@@ -167,7 +175,14 @@ class LibraryRepository(
         uris.mapIndexedNotNull { index, uri ->
             val name = displayName(uri) ?: "Audio-${index + 1}"
             onProgress(TransferProgress(index, uris.size, name))
-            runCatching { importAudio(uri, name) }.getOrNull().also {
+            val imported = try {
+                importAudio(uri, name)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                null
+            }
+            imported.also {
                 onProgress(TransferProgress(index + 1, uris.size, name))
             }
         }
@@ -181,7 +196,9 @@ class LibraryRepository(
             val destination = uniqueMusicFile(preferred)
             try {
                 if (!download.file.renameTo(destination)) {
-                    download.file.copyTo(destination)
+                    // uniqueMusicFile reserves the destination with createNewFile(), so a
+                    // cross-filesystem fallback must replace that empty reservation explicitly.
+                    download.file.copyTo(destination, overwrite = true)
                     download.file.delete()
                 }
                 trackFromFile(
@@ -247,24 +264,18 @@ class LibraryRepository(
     }
 
     suspend fun deleteLocalTrack(library: StoredLibrary, trackID: String): StoredLibrary =
-        withContext(Dispatchers.IO) {
-            val track = library.tracks.firstOrNull { it.id == trackID } ?: return@withContext library
-            fileForTrack(track).delete()
-            artworkFile(track)?.delete()
-            normalize(
-                library.copy(
-                    tracks = library.tracks.filterNot { it.id == trackID },
-                    favorites = library.favorites - trackID,
-                    playlists = library.playlists.map { playlist ->
-                        playlist.copy(trackIDs = playlist.trackIDs.filterNot { it == trackID })
-                    },
-                ),
-            )
-        }
+        deleteLocalTracks(library, setOf(trackID))
 
     suspend fun deleteLocalTracks(library: StoredLibrary, trackIDs: Set<String>): StoredLibrary =
         withContext(Dispatchers.IO) {
-            trackIDs.fold(library) { current, id -> deleteLocalTrack(current, id) }
+            if (trackIDs.isEmpty()) return@withContext library
+            val deleting = library.tracks.filter { it.id in trackIDs }
+            if (deleting.isEmpty()) return@withContext library
+            deleting.forEach { track ->
+                fileForTrack(track).delete()
+                artworkFile(track)?.delete()
+            }
+            normalize(LibraryMutationPolicy.removeTracks(library, trackIDs))
         }
 
     suspend fun storageStats(library: StoredLibrary): StorageStats = withContext(Dispatchers.IO) {
@@ -371,10 +382,14 @@ class LibraryRepository(
         file.parentFile?.canonicalFile == directory.canonicalFile
     }.getOrDefault(false)
 
-    private fun normalize(library: StoredLibrary): StoredLibrary {
+    private fun normalize(library: StoredLibrary, verifyFiles: Boolean = true): StoredLibrary {
         val reconciled = RemoteTrackIdentityPolicy.reconcileLibraryTracks(
             library = library,
-            candidateTracks = library.tracks.filter { fileForTrack(it).isFile },
+            candidateTracks = if (verifyFiles) {
+                library.tracks.filter { fileForTrack(it).isFile }
+            } else {
+                library.tracks
+            },
         )
         val existingTracks = reconciled.tracks.map(ProviderMediaURLPolicy::sanitizeTrack)
         val trackIDs = existingTracks.mapTo(linkedSetOf()) { it.id }
@@ -555,12 +570,14 @@ class LibraryRepository(
             .replace('/', '-')
             .replace('\\', '-')
             .trim()
-            .ifEmpty { "Audio-${System.currentTimeMillis()}" }
+            .takeUnless { it == "." || it == ".." }
+            ?.ifEmpty { "Audio-${System.currentTimeMillis()}" }
+            ?: "Audio-${System.currentTimeMillis()}"
         val extension = sanitized.substringAfterLast('.', "")
         val base = if (extension.isEmpty()) sanitized else sanitized.dropLast(extension.length + 1)
         var candidate = File(musicDirectory, sanitized)
         var counter = 2
-        while (candidate.exists()) {
+        while (!candidate.createNewFile()) {
             candidate = File(
                 musicDirectory,
                 if (extension.isEmpty()) "$base $counter" else "$base $counter.$extension",

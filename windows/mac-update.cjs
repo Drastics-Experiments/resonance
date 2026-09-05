@@ -1,3 +1,4 @@
+const { readResponseBytes } = require("./response-body.cjs");
 const { createHash, randomUUID } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs/promises");
@@ -119,12 +120,6 @@ function compareMacReleaseCandidates(left, right) {
   return leftTag.tag === rightTag.tag ? 0 : leftTag.tag > rightTag.tag ? 1 : -1;
 }
 
-function selectNewestMacRelease(candidates) {
-  return [...(Array.isArray(candidates) ? candidates : [])]
-    .filter((candidate) => parseMacReleaseTag(candidate?.releaseTag || candidate?.tag))
-    .sort((left, right) => compareMacReleaseCandidates(right, left))[0] || null;
-}
-
 function normalizedBuild(value) {
   const build = String(value ?? "").trim();
   if (!/^\d{1,10}$/.test(build)) return null;
@@ -221,47 +216,7 @@ async function responseBytes(response, maximumBytes, label) {
     await cancelBody(response);
     throw new Error(`${label} returned HTTP ${response?.status || 0}.`);
   }
-  const declared = Number(response.headers?.get?.("content-length") || 0);
-  if (Number.isFinite(declared) && declared > maximumBytes) {
-    await cancelBody(response);
-    throw new Error(`${label} is too large.`);
-  }
-  // Small response doubles used by tests may expose json() without a body
-  // stream. Keep that fallback bounded as well; native fetch responses use the
-  // streaming path below.
-  if (!response.body) {
-    if (typeof response.json === "function") {
-      const value = await response.json();
-      const encoded = Buffer.from(JSON.stringify(value));
-      if (encoded.length > maximumBytes) throw new Error(`${label} is too large.`);
-      return encoded;
-    }
-    if (typeof response.text === "function") {
-      const encoded = Buffer.from(String(await response.text()));
-      if (encoded.length > maximumBytes) throw new Error(`${label} is too large.`);
-      return encoded;
-    }
-    return Buffer.alloc(0);
-  }
-  const reader = response.body.getReader();
-  const chunks = [];
-  let total = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maximumBytes) {
-        await reader.cancel().catch(() => undefined);
-        throw new Error(`${label} is too large.`);
-      }
-      chunks.push(Buffer.from(value));
-    }
-  } catch (error) {
-    await reader.cancel().catch(() => undefined);
-    throw error;
-  }
-  return Buffer.concat(chunks, total);
+  return readResponseBytes(response, maximumBytes, label);
 }
 
 function normalizeMacUpdateManifest(value, { releaseTag } = {}) {
@@ -512,7 +467,6 @@ module.exports = {
   normalizedBuild,
   normalizedVersion,
   parseMacReleaseTag,
-  selectNewestMacRelease,
   sha256File,
   trustedFetch,
   updateArchiveFilename,

@@ -215,22 +215,27 @@ function streamSessionIDFromURL(value) {
 
 function createExactLengthRelay(body, expectedLength, onDone = () => {}, onChunk = () => {}) {
   const length = Number(expectedLength);
-  if (!body?.getReader || !Number.isSafeInteger(length) || length <= 0 || length > MAX_SERVER_MEDIA_BYTES) {
+  if (!body || !Number.isSafeInteger(length) || length <= 0 || length > MAX_SERVER_MEDIA_BYTES) {
     fail("INVALID_STREAM_BODY", "The server returned an invalid stream body.");
   }
   const reader = body.getReader();
   let total = 0;
   let finished = false;
+  let cancellation = null;
   const finish = () => {
     if (finished) return;
     finished = true;
-    try { reader.releaseLock(); } catch { /* already released */ }
+    reader.releaseLock();
     onDone();
   };
+  const cancelAndFinish = (reason) => cancellation ||= reader.cancel(reason)
+    .catch(() => {})
+    .finally(finish);
   return new ReadableStream({
     async pull(controller) {
       try {
         const { done, value } = await reader.read();
+        if (cancellation) return;
         if (done) {
           if (total !== length) fail("TRUNCATED_STREAM", "The streaming response ended before its declared length.");
           finish();
@@ -242,15 +247,11 @@ function createExactLengthRelay(body, expectedLength, onDone = () => {}, onChunk
         onChunk(value.byteLength);
         controller.enqueue(value);
       } catch (error) {
-        await reader.cancel(error).catch(() => undefined);
-        finish();
+        try { await cancelAndFinish(error); } catch { /* onDone errors are reported to the stream */ }
         controller.error(error);
       }
     },
-    async cancel(reason) {
-      await reader.cancel(reason).catch(() => undefined);
-      finish();
-    },
+    cancel: cancelAndFinish,
   });
 }
 

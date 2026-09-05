@@ -46,7 +46,6 @@ import {
   normalizeState,
   playbackRangeForTrack,
   planMissingDownloadedUploads,
-  playlistArtworkTrackIDs,
   playlistInsertionIndex,
   preservedUploadSourceURL,
   remoteAssociationConflictFilePaths,
@@ -97,7 +96,6 @@ const {
   parseWindowsReleaseTag,
   resolveMacUpdateManifest,
   resolveWindowsUpdateFeed,
-  selectNewestWindowsRelease,
 } = updaterFeed;
 const { isManagedLibraryFile } = libraryPaths;
 const {
@@ -115,20 +113,14 @@ const {
 } = serverDownload;
 const { discordArtworkURL, sanitizeDiscordActivity } = discordRPC;
 
-test("playlist artwork uses only the first four custom-playlist songs", () => {
-  const trackIDs = ["one", "two", "three", "four", "five"];
-  assert.deepEqual(playlistArtworkTrackIDs({ trackIDs, isSystem: false }), trackIDs.slice(0, 4));
-  assert.deepEqual(playlistArtworkTrackIDs({ trackIDs, isSystem: true }), []);
-});
-
 test("playlist artwork hydrates from remote-only playlist entries", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
-  assert.match(appSource, /tracksForPlaylist\(state, playlist\?\.id, serverCatalog\)\.slice\(0, 4\)/);
+  assert.match(appSource, /tracksForPlaylist\(state, playlist\?\.id, serverCatalog, indexes\)\.slice\(0, 4\)/);
   assert.match(appSource, /data-playlist-artwork-remote-id/);
   assert.match(appSource, /function updatePlaylistArtworkNodes\(song\)[\s\S]+squareArtworkImageMarkup\(source\)/);
   assert.match(appSource, /hydrateServerArtwork\(song\)[\s\S]+updatePlaylistArtworkNodes\(song\)/);
-  assert.match(appSource, /function playlistArtworkCatalogSongs\(songs = serverCatalog\)[\s\S]+tracksForPlaylist\(state, playlist\.id, songs\)\.slice\(0, 4\)/);
-  assert.match(appSource, /function renderSidebar\(\)[\s\S]+hydratePlaylistArtwork\(serverCatalog\)/);
+  assert.match(appSource, /function playlistArtworkCatalogSongs\(songs = serverCatalog, indexes\)[\s\S]+tracksForPlaylist\(state, playlist\.id, songs, indexes\)\.slice\(0, 4\)/);
+  assert.match(appSource, /function renderSidebar\(\)[\s\S]+hydratePlaylistArtwork\(serverCatalog, model\)/);
 });
 
 test("starts catalog and metadata loading without opening the server page", () => {
@@ -908,7 +900,7 @@ test("keeps contextual search and sorting in the persistent top bar", () => {
   assert.match(preloadSource, /cancelServerTransfer:[\s\S]+server:cancel-transfer/);
   assert.match(preloadSource, /fetchServerArtwork:[\s\S]+server:artwork/);
   assert.match(mainSource, /ipcMain\.handle\("server:artwork"/);
-  assert.match(mainSource, /responseBytesWithLimit\(response, MAX_SERVER_ARTWORK_BYTES\)/);
+  assert.match(mainSource, /readResponseBytes\(response, MAX_SERVER_ARTWORK_BYTES, "Server artwork"\)/);
   assert.match(appSource, /hydrateServerCatalogArtwork\(serverCatalog\)/);
   assert.match(mainSource, /new AbortController\(\)/);
   assert.match(mainSource, /server:cancel-transfer/);
@@ -1539,7 +1531,7 @@ test("gives interactive rows real primary buttons alongside secondary controls",
   assert.match(appSource, /const storageActionLabel = storageEditing/);
   assert.match(appSource, /aria-disabled="\$\{!storageEditing && unavailable\}"/);
   assert.match(appSource, /primaryAction\.onclick/);
-  assert.match(appSource, /document\.querySelectorAll\("\[data-storage-select\]"\)/);
+  assert.match(appSource, /root\.querySelectorAll\("\[data-storage-select\]"\)/);
 });
 
 test("uses the playlist dropdown treatment across app popup menus", () => {
@@ -1605,7 +1597,7 @@ test("animates server artwork placeholders until each image loads", () => {
   assert.match(appSource, /function updateServerArtworkNode\(song\)/);
   assert.match(appSource, /data-server-artwork-id/);
   assert.doesNotMatch(appSource, /scheduleServerArtworkRender/);
-  assert.match(appSource, /function bindServerArtworkLoadStates\(\)/);
+  assert.match(appSource, /function bindServerArtworkLoadStates\(root = document\)/);
   assert.match(appSource, /image\.addEventListener\("load", reveal/);
   assert.match(styleSource, /@keyframes server-artwork-shimmer/);
   assert.match(styleSource, /@keyframes server-artwork-pulse/);
@@ -1719,7 +1711,7 @@ test("keeps link import local-first with explicit candidate confirmation and opt
   assert.match(appSource, /sourceURL: candidate\.sourceURL/);
   assert.match(appSource, /state\.tracks\.push\(importedTrack\)[\s\S]+await persist\(\)/);
   assert.match(appSource, /if \(!response\.result\.serverBacked && uploadRequested[\s\S]+uploadImportedTrackWithMode\(/);
-  assert.match(appSource, /function uploadLocalImportTrack\(track, context\)[\s\S]+api\.uploadLocalImport/);
+  assert.match(appSource, /function uploadImportedTrackWithMode\(track, context, mode\)[\s\S]+api\.uploadLocalImport/);
   assert.doesNotMatch(appSource, /A failed upload will not remove or alter the local media file/);
   assert.match(appSource, /mediaKind: localImportResolution\.mediaKind|mediaKind,/);
   assert.match(mainSource, /outputFormats: \{ audio: "m4a", video: "mp4" \}/);
@@ -1828,7 +1820,7 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.doesNotMatch(htmlSource, /id="listeningHistorySummary"/);
   assert.match(appSource, /function renderListeningHistory\(\)/);
   assert.match(appSource, /historyWindowLabel"\)\.textContent = formatHistoryWindowLabel\(summary\)/);
-  assert.match(appSource, /function currentListeningHistorySummary\(\)[\s\S]+summarizeListeningHistory\(state, range, new Date\(\), listeningHistoryWindowOffset\)/);
+  assert.match(appSource, /function currentListeningHistorySummary\(index\)[\s\S]+summarizeListeningHistory\(state, range, new Date\(\), listeningHistoryWindowOffset, index\)/);
   assert.match(appSource, /function ensureListeningHistorySelection\(summary = currentListeningHistorySummary\(\)\)[\s\S]+preferredListeningHistoryBucket\(summary\)/);
   assert.match(appSource, /function shiftListeningHistoryWindow\(offsetChange\)[\s\S]+selectedIndex[\s\S]+listeningHistoryWindowOffset = Math\.max\(0,[\s\S]+nextSummary\.days/);
   assert.match(appSource, /const selectedBucketExists = summary\.days\.some[\s\S]+const hasSelectedDay = listeningHistoryMode === "overall" && selectedBucketExists/);
@@ -1841,7 +1833,7 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(appSource, /entry\.listenedSeconds \+= delta/);
   assert.match(appSource, /function finishListeningSessionForReplay\(\)[\s\S]+activeListeningEntryID = null/);
   assert.match(appSource, /media\.onended = \(\) => \{[\s\S]+if \(repeat\) \{[\s\S]+finishListeningSessionForReplay\(\)[\s\S]+requestPlayback\(\)/);
-  assert.match(appSource, /function pendingListeningHistoryBatches\(\)[\s\S]+listeningHistoryEntryQualifiesAsPlay\(state, entry\)/);
+  assert.match(appSource, /function pendingListeningHistoryBatches\(\)[\s\S]+listeningHistoryEntryQualifiesAsPlay\(state, entry, historyIndex\)/);
   assert.match(appSource, /api\.onPrepareToClose\(async \(\) =>[\s\S]+updateListeningSession\(\)[\s\S]+await persist\(\{ refreshSidebar: false \}\)[\s\S]+api\.readyToClose\(\)/);
   assert.match(preloadSource, /onPrepareToClose:[\s\S]+app:prepare-close/);
   assert.match(preloadSource, /readyToClose:[\s\S]+app:close-ready/);
@@ -1872,13 +1864,15 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(appSource, /result\?\.supported === false/);
   assert.match(appSource, /scheduleListeningHistorySync\(\)/);
   assert.match(appSource, /syncListeningHistoryNow\(\{ force: true \}\)/);
-  assert.match(mainSource, /librarySaveQueue[\s\S]+\.catch\(\(\) => \{\}\)[\s\S]+atomicWriteFile/);
+  assert.match(mainSource, /librarySaveQueue = createLatestValueWriter\([\s\S]+atomicWriteFile/);
+  assert.match(mainSource, /prepare: \(snapshot\) => JSON\.stringify\(persistentLibraryState\(snapshot\)/);
+  assert.match(mainSource, /ipcMain\.handle\("library:save", \(_event, state\) => librarySaveQueue\(state\)/);
   assert.match(mainSource, /window\.webContents\.send\("app:prepare-close"\)/);
   assert.match(mainSource, /ipcMain\.on\("app:close-ready"/);
   assert.match(mainSource, /app\.on\("before-quit", \(\) => \{[\s\S]+applicationQuitRequested = true;/);
   assert.match(mainSource, /clearTimeout\(automaticUpdateCheckTimer\)[\s\S]+clearInterval\(automaticUpdateCheckInterval\)/);
   assert.match(mainSource, /if \(applicationQuitRequested\) app\.quit\(\);/);
-  assert.match(appSource, /const allTimeStats = summarizeListeningStats\(state, new Date\(\)\)/);
+  assert.match(appSource, /const allTimeStats = summarizeListeningStats\(state, new Date\(\), historyIndex\)/);
   assert.match(appSource, /toolbar\.hidden = statsMode/);
   assert.match(appSource, /"Total Time Listened"[\s\S]+"Total Plays"[\s\S]+"Total Songs Heard"[\s\S]+"Most Popular Artist"/);
   assert.doesNotMatch(appSource, /"Average Play"[\s\S]+"Today"[\s\S]+"Top Song"[\s\S]+"Library Size"/);
@@ -1910,7 +1904,7 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(appSource, /summary\.granularity === "hour"[\s\S]+hour: "numeric"/);
   assert.match(appSource, /\$\{hourly \? "HOUR" : "DAY"\} BREAKDOWN/);
   assert.doesNotMatch(appSource, /Math\.max\(30, Math\.ceil\(peak \/ 30\) \* 30\)/);
-  assert.match(appSource, /function bindListeningHistoryChartInteractions\(summary\)/);
+  assert.match(appSource, /function bindListeningHistoryChartInteractions\(summary, historyIndex\)/);
   assert.match(appSource, /addEventListener\("pointermove"/);
   assert.match(appSource, /class="history-chart-tooltip"/);
   assert.match(appSource, /class="history-chart-viewport" data-day-count="\$\{summary\.days\.length\}"/);
@@ -1918,7 +1912,7 @@ test("opens a listening-history analytics dialog and records real playback time"
   assert.match(appSource, /preserveAspectRatio="none"/);
   assert.doesNotMatch(appSource, /daySpacing|scrollWidth|focusLatest/);
   assert.match(appSource, /const bars = points\.map/);
-  assert.match(appSource, /function historyDayDetailsMarkup\(summary, dayKey\)/);
+  assert.match(appSource, /function historyDayDetailsMarkup\(summary, dayKey, historyIndex\)/);
   assert.match(appSource, /data-history-day="\$\{escapeHTML\(point\.day\.key\)\}"[\s\S]+role="button" tabindex="0"/);
   assert.match(appSource, /class="history-day-song-header"[\s\S]+Title[\s\S]+Album[\s\S]+Listening time[\s\S]+Plays/);
   assert.match(appSource, /class="history-day-song-number"[\s\S]+artwork\(track\)[\s\S]+class="history-day-song-copy"[\s\S]+class="history-day-song-album"/);
@@ -2378,16 +2372,11 @@ test("selects the newest stable or timestamped prerelease Windows update feed", 
   const fetchImpl = async (url) => {
     const href = String(url);
     if (href.includes("api.github.com")) {
-      return { ok: true, status: 200, headers: { get: () => null }, json: async () => releases };
+      return Response.json(releases);
     }
     const tag = href.match(/\/download\/(v[^/]+)\/latest\.yml$/)?.[1];
     const parsed = parseWindowsReleaseTag(tag);
-    return {
-      ok: true,
-      status: 200,
-      headers: { get: () => null },
-      text: async () => `version: ${parsed.effectiveVersion}\nresonanceBuild: ${tag.includes("4123") ? 22 : 21}\n`,
-    };
+    return new Response(`version: ${parsed.effectiveVersion}\nresonanceBuild: ${tag.includes("4123") ? 22 : 21}\n`);
   };
 
   const selected = await resolveWindowsUpdateFeed(fetchImpl, { prerelease: true });
@@ -2395,7 +2384,6 @@ test("selects the newest stable or timestamped prerelease Windows update feed", 
   assert.equal(selected.version, "1.0.4-pre.1788154123");
   assert.equal(selected.build, 22);
   assert.equal(selected.feedURL, "https://github.com/Drastics-Experiments/resonance/releases/download/v1.0.4-pre.1788154123/");
-  assert.equal(selectNewestWindowsRelease([selected, { tag: "v1.0.4-pre.1788150123", build: 21 }]), selected);
 });
 
 test("developer update feeds select prereleases with the required platform manifest", async () => {
@@ -2434,8 +2422,8 @@ test("developer update feeds select prereleases with the required platform manif
     },
   ];
   const fetchImpl = async (url) => String(url).endsWith("latest.yml")
-    ? { ok: true, text: async () => `version: ${String(url).includes("pre.1788154123") ? "1.2.0-pre.1788154123" : "1.1.0"}\nresonanceBuild: 21\n` }
-    : { ok: true, json: async () => releases };
+    ? new Response(`version: ${String(url).includes("pre.1788154123") ? "1.2.0-pre.1788154123" : "1.1.0"}\nresonanceBuild: 21\n`)
+    : Response.json(releases);
   assert.deepEqual(await resolveWindowsUpdateFeed(fetchImpl, { prerelease: true }), {
     tag: "v1.2.0-pre.1788154123",
     feedURL: "https://github.com/Drastics-Experiments/resonance/releases/download/v1.2.0-pre.1788154123/",
@@ -2459,15 +2447,12 @@ test("developer update feeds select prereleases with the required platform manif
     sourceTimestamp: null,
   });
 
-  const unsafeFetch = async () => ({
-    ok: true,
-    json: async () => [{
+  const unsafeFetch = async () => Response.json([{
       tag_name: "v9.0.0-pre.1788159123",
       draft: false,
       prerelease: true,
       assets: [{ name: "latest.yml", browser_download_url: "https://evil.example/latest.yml" }],
-    }],
-  });
+    }]);
   await assert.rejects(
     resolveWindowsUpdateFeed(unsafeFetch, { prerelease: true }),
     /No published prerelease contains latest\.yml/,
@@ -2475,10 +2460,7 @@ test("developer update feeds select prereleases with the required platform manif
 });
 
 test("developer source builds can scan a bounded Windows manifest without installing", async () => {
-  const fetchImpl = async () => ({
-    ok: true,
-    text: async () => "version: 2.1.0-beta.3\npath: Resonance-Setup-2.1.0-beta.3.exe\n",
-  });
+  const fetchImpl = async () => new Response("version: 2.1.0-beta.3\npath: Resonance-Setup-2.1.0-beta.3.exe\n");
   assert.equal(
     await fetchWindowsUpdateVersion(
       "https://github.com/Drastics-Experiments/resonance/releases/download/v2.1.0-beta.3/latest.yml",
@@ -2493,12 +2475,7 @@ test("developer source builds can scan a bounded Windows manifest without instal
 });
 
 test("rejects release lists without a Windows manifest and shortens updater errors", async () => {
-  const fetchImpl = async () => ({
-    ok: true,
-    status: 200,
-    headers: { get: () => null },
-    json: async () => [{ tag_name: "android-v1.0.4", assets: [] }],
-  });
+  const fetchImpl = async () => Response.json([{ tag_name: "android-v1.0.4", assets: [] }]);
   await assert.rejects(resolveWindowsUpdateFeed(fetchImpl), /No published stable release contains latest\.yml/);
   assert.equal(
     conciseUpdaterError(new Error("Cannot find latest.yml: 404 Not Found\nvery long response headers and stack")),
@@ -3313,7 +3290,7 @@ test("continues planning after the first downloaded song is already on the serve
 test("does not hold uploads behind catalog, playlist, likes, profile, or history synchronization", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const sourceBetween = (start, end) => appSource.slice(appSource.indexOf(start), appSource.indexOf(end));
-  const localUploadSource = sourceBetween("async function uploadLocalImportTrack", "async function refreshServerCatalogAfterUpload");
+  const localUploadSource = sourceBetween("async function uploadImportedTrackWithMode", "async function refreshServerCatalogAfterUpload");
   const catalogRefreshSource = sourceBetween("async function refreshServerCatalogAfterUpload", "function scheduleServerCatalogRefresh");
   const rememberUploadsSource = sourceBetween("function rememberUploadedServerSongs", "function serverCatalogMatchForLocalImport");
   const localCatalogMatchSource = sourceBetween("function serverCatalogMatchForLocalImport", "async function prepareLocalImportUploadBatch");
@@ -3352,7 +3329,7 @@ test("reserves immutable upload contexts while account sessions replace credenti
   const sourceBetween = (start, end) => appSource.slice(appSource.indexOf(start), appSource.indexOf(end));
   const contextSource = sourceBetween("function currentServerUploadContext", "function serverArtworkKey");
   const saveFormSource = sourceBetween("async function saveServerForm", "function renderSettings");
-  const localUploadSource = sourceBetween("async function uploadLocalImportTrack", "async function refreshServerCatalogAfterUpload");
+  const localUploadSource = sourceBetween("async function uploadImportedTrackWithMode", "async function refreshServerCatalogAfterUpload");
   const localBatchSource = sourceBetween("async function prepareLocalImportUploadBatch", "function resetLocalImportArtwork");
   const playlistImportSource = sourceBetween("async function confirmPlaylistImport", "async function confirmLinkImport");
   const linkImportSource = sourceBetween("async function confirmLinkImport", "async function cancelLinkImport");
@@ -3368,7 +3345,7 @@ test("reserves immutable upload contexts while account sessions replace credenti
   assert.doesNotMatch(appSource, /id="serverToken"|id="serverAdminToken"/);
   assert.match(appSource, /data-auth-provider="clerk"/);
   assert.match(appSource, /email, Google, Apple, and Discord/);
-  assert.match(localUploadSource, /uploadLocalImportTrack\(track, context\)[\s\S]+requireLocalImportServerContext\(context\)/);
+  assert.match(localUploadSource, /uploadImportedTrackWithMode\(track, context, mode\)[\s\S]+requireLocalImportServerContext\(context\)/);
   assert.match(localUploadSource, /baseURL: context\.serverURL[\s\S]+adminToken: context\.adminToken[\s\S]+profileID: context\.profileID/);
   assert.match(localBatchSource, /prepareLocalImportUploadBatch\(tracks, context\)[\s\S]+uploadLocalImportTracks\(tracks, context\)/);
   assert.match(playlistImportSource, /reserveServerContext\(importContext\)[\s\S]+prepareLocalImportUploadBatch\(uploadQueue, importContext\)[\s\S]+releaseServerContext\(importContext\)/);

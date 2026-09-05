@@ -162,4 +162,24 @@ final class MobileListeningHistoryTests: XCTestCase {
         XCTAssertEqual(MobileListeningHistoryPolicy.bounded(entries).count, 2_000)
         XCTAssertEqual(MobileListeningHistoryPolicy.batches(Array(0..<1_201)).map(\.count), [500, 500, 201])
     }
+
+    func testHistoryBoundingKeepsChronologicalOrderForUnsortedInput() {
+        let older = MobileListeningHistoryEntry(
+            trackID: UUID(),
+            startedAt: startedAt,
+            listenedSeconds: 1,
+            duration: 1
+        )
+        let newer = MobileListeningHistoryEntry(
+            trackID: UUID(),
+            startedAt: startedAt.addingTimeInterval(60),
+            listenedSeconds: 1,
+            duration: 1
+        )
+
+        XCTAssertEqual(
+            MobileListeningHistoryPolicy.bounded([newer, older]).map(\.startedAt),
+            [older.startedAt, newer.startedAt]
+        )
+    }
 }
