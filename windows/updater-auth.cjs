@@ -88,14 +88,27 @@ function verifyWindowsUpdatePublisher({
   }
 
   if (policy.authenticityMode === WINDOWS_UPDATE_AUTHENTICITY_UNSIGNED) {
-    if (!unsignedAuthenticodeSignature(currentSignature) || !unsignedAuthenticodeSignature(updateSignature)) {
-      throw new Error("The unsigned Windows update policy requires both executables to be explicitly unsigned.");
+    if (!unsignedAuthenticodeSignature(currentSignature)) {
+      throw new Error("The unsigned Windows update policy requires the installed executable to be explicitly unsigned.");
     }
+    if (unsignedAuthenticodeSignature(updateSignature)) {
+      return Object.freeze({
+        authenticityMode: policy.authenticityMode,
+        verified: true,
+        authenticode: false,
+        exception: policy.exception,
+      });
+    }
+    const update = canonicalAuthenticodeSignature(updateSignature);
+    if (!update) throw new Error("The Windows update is neither explicitly unsigned nor Authenticode-signed by a valid certificate.");
     return Object.freeze({
       authenticityMode: policy.authenticityMode,
       verified: true,
-      authenticode: false,
-      exception: policy.exception,
+      authenticode: true,
+      exception: "unsigned-build-signed-upgrade",
+      subject: update.subject,
+      issuer: update.issuer,
+      thumbprint: update.thumbprint,
     });
   }
 

@@ -15,7 +15,7 @@ Generated artifacts are placed in `installers/windows/dist/` and are intentional
 
 The installer is per-user, supports choosing an installation directory, and creates Start Menu and Desktop shortcuts. Application data remains under Electron's per-user application-data directory and is not removed during upgrades.
 
-After the first installation, Resonance checks and downloads updates inside the app. Choosing **Restart & update** runs the verified NSIS update silently against the existing installation and relaunches Resonance; it does not show the setup wizard or ask the user to choose an installation directory again. Production-signed packages verify the update against the installed Authenticode publisher. Packages built through the explicit unsigned-desktop release option embed that policy, require both executables to report `NotSigned`, and rely on the updater manifest checksum for subsequent unsigned updates.
+After the first installation, Resonance checks and downloads updates inside the app. Choosing **Restart & update** runs the verified NSIS update silently against the existing installation and relaunches Resonance; it does not show the setup wizard or ask the user to choose an installation directory again. Production-signed packages verify the update against the installed Authenticode publisher. Packages built through the explicit unsigned-desktop release option embed that policy and rely on the updater manifest checksum; they can take a subsequent explicitly unsigned update or move forward to a validly Authenticode-signed package. Signed installations never accept an unsigned downgrade.
 
 ## Download or install the latest release
 

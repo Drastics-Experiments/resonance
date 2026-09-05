@@ -421,6 +421,7 @@ async function launchMacUpdateInstaller({
   spawnImpl = spawn,
   fsImpl = fs,
   environment = process.env,
+  allowDevelopmentUpdates = false,
   authorizeInstall = () => true,
 } = {}) {
   const normalized = normalizedVersion(version);
@@ -434,10 +435,16 @@ async function launchMacUpdateInstaller({
     if (!authorizeInstall()) throw new Error("The macOS update channel changed.");
     await fsImpl.chmod(helper, 0o700);
     if (!authorizeInstall()) throw new Error("The macOS update channel changed.");
+    const childEnvironment = { ...environment };
+    // Development builds carry an explicit updater policy in their bundle.
+    // Translate that policy into the helper's narrowly scoped opt-in instead
+    // of requiring users to launch the app with a hidden environment flag.
+    if (allowDevelopmentUpdates) childEnvironment.RESONANCE_ALLOW_UNVERIFIED_UPDATES = "1";
+    else delete childEnvironment.RESONANCE_ALLOW_UNVERIFIED_UPDATES;
     const child = spawnImpl("/bin/bash", [helper, archivePath, destinationPath, String(processID), normalized], {
       detached: true,
       stdio: "ignore",
-      env: { ...environment },
+      env: childEnvironment,
     });
     child.unref?.();
     return true;

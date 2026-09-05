@@ -1216,6 +1216,7 @@ async function installMacUpdate() {
     helperPath,
     processID: process.pid,
     version: manifest.version,
+    allowDevelopmentUpdates: desktopPackage.resonanceUpdateAuthenticity === "development",
     authorizeInstall: () => desktopUpdateChannel.isCurrent(generation)
       && macUpdateArtifactGeneration === generation
       && macUpdateManifest === manifest

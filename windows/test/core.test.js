@@ -2516,6 +2516,7 @@ test("installs downloaded Windows updates silently in place", () => {
   assert.match(mainSource, /const verificationPromise = windowsUpdateVerificationPromise;[\s\S]+if \(verificationPromise\) await verificationPromise;[\s\S]+if \(!desktopUpdateChannel\.isCurrent\(generation\)\) return null/);
   assert.match(mainSource, /publishUpdateStatusForGeneration\(generation, "ready"/);
   assert.match(mainSource, /macUpdateArtifactGeneration !== generation/);
+  assert.match(mainSource, /allowDevelopmentUpdates: desktopPackage\.resonanceUpdateAuthenticity === "development"/);
   assert.match(mainSource, /authorizeInstall: \(\) => desktopUpdateChannel\.isCurrent\(generation\)/);
   assert.match(htmlSource, /Restart &amp; update/);
   assert.match(readmeSource, /runs the verified NSIS update silently/);

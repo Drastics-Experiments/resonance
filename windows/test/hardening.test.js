@@ -393,6 +393,26 @@ test("uses the immutable packaged update policy for explicitly unsigned Windows 
   });
   assert.equal(reads.length, 2);
 
+  const signed = {
+    status: "Valid",
+    subject: "CN=Resonance Release, O=Resonance",
+    issuer: "CN=Trusted Issuer",
+    thumbprint: "a".repeat(40),
+  };
+  assert.deepEqual(verifyWindowsUpdatePublisher({
+    currentSignature: unsigned,
+    updateSignature: signed,
+    authenticityMode: "unsigned",
+  }), {
+    authenticityMode: "unsigned",
+    verified: true,
+    authenticode: true,
+    exception: "unsigned-build-signed-upgrade",
+    subject: signed.subject,
+    issuer: signed.issuer,
+    thumbprint: signed.thumbprint.toUpperCase(),
+  });
+
   assert.throws(() => verifyWindowsUpdatePublisher({
     currentSignature: {
       status: "Valid",
@@ -402,12 +422,12 @@ test("uses the immutable packaged update policy for explicitly unsigned Windows 
     },
     updateSignature: unsigned,
     authenticityMode: "unsigned",
-  }), /both executables to be explicitly unsigned/i);
+  }), /installed executable to be explicitly unsigned/i);
   assert.throws(() => verifyWindowsUpdatePublisher({
     currentSignature: unsigned,
     updateSignature: { status: "HashMismatch" },
     authenticityMode: "unsigned",
-  }), /both executables to be explicitly unsigned/i);
+  }), /neither explicitly unsigned nor Authenticode-signed/i);
 
   assert.throws(() => updateAuthenticityPolicy({
     packaged: true,

@@ -19,7 +19,10 @@ and replaces an existing installation atomically.
 
 Local builds and ordinary pull-request/main CI artifacts remain ad-hoc signed so
 contributors can build without Apple credentials. They are development artifacts
-and cannot be promoted by the release-candidate workflow.
+and cannot be promoted by the release-candidate workflow. Their embedded
+development updater policy allows in-app updates to another verified ad-hoc build
+or to a valid production-signed build. Production installations never accept an
+ad-hoc downgrade.
 
 A production candidate fails closed unless the Electron app has a timestamped
 Developer ID Application signature with hardened runtime, the PKG has a trusted
