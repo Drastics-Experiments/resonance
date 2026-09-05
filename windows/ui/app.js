@@ -1039,9 +1039,8 @@ function updatePlaylistDragPreview(targetRow, insertAfter = false) {
 function clearPlaylistPointerDrag() {
   const drag = playlistPointerDrag;
   playlistPointerDrag = null;
-  if (drag?.pointerID != null) {
-    const sourceRow = document.querySelector(`[data-playlist-entry="${CSS.escape(drag.sourceID)}"]`);
-    if (sourceRow?.hasPointerCapture(drag.pointerID)) sourceRow.releasePointerCapture(drag.pointerID);
+  if (drag?.pointerID != null && drag.captureTarget?.hasPointerCapture(drag.pointerID)) {
+    drag.captureTarget.releasePointerCapture(drag.pointerID);
   }
   draggingPlaylistTrackID = null;
   draggingPlaylistTargetID = null;
@@ -5567,8 +5566,11 @@ function bindTrackRows(playbackTracks = playlistTracks(), root = document) {
           startX: event.clientX,
           startY: event.clientY,
           active: false,
+          captureTarget: primaryAction,
         };
-        row.setPointerCapture(event.pointerId);
+        // Keep the pointer attached through a drag without retargeting a
+        // normal click away from the full-row play button.
+        primaryAction.setPointerCapture(event.pointerId);
       };
       row.onpointermove = (event) => {
         const drag = playlistPointerDrag;
