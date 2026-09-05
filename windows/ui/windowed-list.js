@@ -42,9 +42,13 @@ export function mountWindowedRows(container, {
   };
   const trim = () => {
     if (disposed || hold()) return;
-    for (const block of mounted) {
-      if (visible.has(block) || block.contains(document.activeElement)) continue;
-      block.style.height = `${block.getBoundingClientRect().height}px`;
+    // Measure every outgoing block before changing the DOM. Alternating reads
+    // and replacements forces a fresh layout for each block during filtering.
+    const outgoing = [...mounted]
+      .filter(block => !visible.has(block) && !block.contains(document.activeElement))
+      .map(block => [block, block.getBoundingClientRect().height]);
+    for (const [block, height] of outgoing) {
+      block.style.height = `${height}px`;
       placeholder(block);
       mounted.delete(block);
     }
@@ -72,8 +76,10 @@ export function mountWindowedRows(container, {
   // positions and subsequent scrolling before they enter the visible area.
   const offset = scroller.getBoundingClientRect().top - container.getBoundingClientRect().top
     + (scroller === container ? scroller.scrollTop : 0);
-  const firstBlock = Math.max(0, Math.floor(offset / (blockSize * (estimatedHeight + gap))) - 1);
-  for (const block of blocks.slice(firstBlock, firstBlock + 3)) { visible.add(block); fill(block); }
+  const blockHeight = blockSize * (estimatedHeight + gap);
+  const firstBlock = Math.max(0, Math.floor(offset / blockHeight));
+  const lastBlock = Math.max(firstBlock, Math.floor((offset + scroller.clientHeight) / blockHeight));
+  for (const block of blocks.slice(firstBlock, lastBlock + 1)) { visible.add(block); fill(block); }
   blocks.forEach((block) => observer.observe(block));
   const deferTrim = () => queueMicrotask(trim);
   container.addEventListener('focusout', deferTrim);
