@@ -9,6 +9,7 @@ if(!Number.isSafeInteger(count)||count<100||count>20000)throw new Error('Choose 
 const label='renderer';
 let saveCount=0;
 let lastSavedVolume=null;
+let storageSummaryReads=0;
 const root=require('node:fs').mkdtempSync(path.join(os.tmpdir(),'resonance-renderer-'));
 app.setPath('userData',root+'/data');
 app.commandLine.appendSwitch('disable-gpu');
@@ -30,7 +31,7 @@ app.whenReady().then(async()=>{
    if(channel==='local-import:capabilities')return {enabled:false};
    if(channel==='server:client-config')return null;
    if(channel==='library:refresh-metadata')return [];
-   if(channel==='library:storage')return {localBytes:0,remoteBytes:count*1000,availableBytes:1e9,capacityBytes:2e9};
+   if(channel==='library:storage'){storageSummaryReads++;return {localBytes:0,remoteBytes:count*1000,availableBytes:1e9,capacityBytes:2e9};}
    return null;
   });
  }
@@ -119,6 +120,49 @@ app.whenReady().then(async()=>{
  return {lastSong:true,keyboardReorder:true,focusRetained:true,favorite:true,search:true,lastQueueSong:true,lastRecentSong:true,recentScrollRestored:true,playback:true};
  })()`);
  }
+ // Use Chromium mouse input: element.click() does not exercise pointer capture
+ // or the native click target that caused playlist playback to regress.
+ win.show();win.focus();win.webContents.focus();
+ const settle=()=>new Promise(resolve=>setTimeout(resolve,250));
+ const inspect=expression=>win.webContents.executeJavaScript(expression);
+ const requireResult=async(expression,message)=>{if(!await inspect(expression))throw new Error(message);};
+ const point=async selector=>inspect(`(()=>{const node=document.querySelector(${JSON.stringify(selector)});if(!node)throw new Error('Missing mouse target');const rect=node.getBoundingClientRect();return {x:Math.round(rect.x+rect.width/2),y:Math.round(rect.y+rect.height/2)};})()`);
+ let mouseHeld=false;
+ const mouse=(type,position)=>{
+   if(type==='mouseDown')mouseHeld=true;
+   if(type==='mouseUp')mouseHeld=false;
+   win.webContents.sendInputEvent({type,...position,button:'left',clickCount:1,modifiers:mouseHeld?['leftButtonDown']:[]});
+ };
+ const click=async selector=>{const position=await point(selector);mouse('mouseMove',position);mouse('mouseDown',position);mouse('mouseUp',position);await settle();};
+ await inspect(`window.__lag.stopPlayback();window.__lag.playlist();document.querySelector('#content').scrollTo({top:0,behavior:'instant'});`);
+ await settle();
+ await inspect(`document.querySelector('#libraryTrackRows > [data-start="0"] .sr-only')?.click();`);
+ await settle();
+ const primary=id=>`[data-track="${id}"] [data-track-activate]`;
+ await click(primary('track-0'));
+ await requireResult(`window.__lag.getState().currentTrackID==='track-0'`, 'A real playlist click did not start its song');
+ const favoritesBefore=await inspect(`window.__lag.getState().favorites.includes('track-1')`);
+ await click('[data-favorite="track-1"]');
+ await requireResult(`window.__lag.getState().currentTrackID==='track-0' && window.__lag.getState().favorites.includes('track-1')!==${favoritesBefore}`, 'Favorite click changed playback or failed to toggle');
+ // Small pointer jitter is still a click, and must not reorder the playlist.
+ const orderBefore=await inspect(`JSON.stringify(window.__lag.getState().playlists.find(p=>p.id==='stress').trackIDs)`);
+ const jitter=await point(primary('track-1'));
+ mouse('mouseMove',jitter);mouse('mouseDown',jitter);
+ mouse('mouseMove',{x:jitter.x+2,y:jitter.y+2});mouse('mouseUp',{x:jitter.x+2,y:jitter.y+2});await settle();
+ await requireResult(`window.__lag.getState().currentTrackID==='track-1' && JSON.stringify(window.__lag.getState().playlists.find(p=>p.id==='stress').trackIDs)===${JSON.stringify(orderBefore)}`, 'Pointer jitter lost playback or reordered a song');
+ await inspect('window.__lag.stopPlayback()');
+ const source=await point(primary('track-0'));
+ const target=await point(primary('track-2'));
+ mouse('mouseMove',source);mouse('mouseDown',source);
+ mouse('mouseMove',{x:source.x,y:source.y+10});await settle();
+ mouse('mouseMove',{x:target.x,y:target.y+8});await settle();
+ mouse('mouseUp',{x:target.x,y:target.y+8});await settle();
+ await requireResult(`JSON.stringify(window.__lag.getState().playlists.find(p=>p.id==='stress').trackIDs.slice(0,3))==='["track-1","track-2","track-0"]'`, 'Real pointer drag did not reorder the playlist');
+ await requireResult(`window.__lag.getState().currentTrackID==='track-1' && !document.querySelector('.playlist-drag-floating, .track-row.dragging')`, 'Dropping a song changed playback or left a drag preview');
+ await settle();
+ await click(primary('track-2'));
+ await requireResult(`window.__lag.getState().currentTrackID==='track-2'`, 'Playlist clicks stopped working after a reorder');
+ result.playlistMouse={click:true,favorite:true,jitter:true,dragReorder:true,noPlayOnDrop:true,clickAfterDrop:true};
  result.secondary=await win.webContents.executeJavaScript(`(async()=>{
  const wait=()=>new Promise(r=>setTimeout(r,250));
  const assert=(value,message)=>{if(!value)throw new Error(message);};
@@ -200,6 +244,48 @@ app.whenReady().then(async()=>{
  document.querySelector('#listeningHistoryDialog').close();
  return {sidebarMs,serverMs,historyCount,historyQueueMs,historyScreenMs,serverSelection:true,serverSearch:true,historyRanking:true,historyDayDetails:true};
  })()`);
+ result.navigationAndFilters=await win.webContents.executeJavaScript(`(async()=>{
+   const wait=()=>new Promise(r=>setTimeout(r,250));
+   const assert=(value,message)=>{if(!value)throw new Error(message);};
+   const times={};const input=document.querySelector('#search');
+   const query=value=>{input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));};
+   window.__lag.stopPlayback();window.__lag.navigate('library');await wait();
+   const sidebar=document.querySelector('#sidebarPlaylists').firstElementChild;
+   for(const tab of ['playlists','storage','server','library']){
+     const start=performance.now();window.__lag.navigate(tab);void document.body.offsetHeight;
+     times[tab]=+(performance.now()-start).toFixed(2);await wait();
+     assert(document.querySelector('#sidebarPlaylists').firstElementChild===sidebar,'Navigation rebuilt unchanged sidebar collections');
+   }
+   let renders=0;
+   const observer=new MutationObserver(entries=>{renders+=entries.length;});
+   observer.observe(document.querySelector('#content'),{childList:true});
+   input.focus();
+   const start=performance.now();
+   for(let index=0;index<20;index++)query('discarded query '+index);
+   query('Song ${String(count-1).padStart(5,'0')}');
+   const typingMs=+(performance.now()-start).toFixed(2);
+   const caret=input.selectionStart;await wait();observer.disconnect();
+   assert(renders===1,'A typing burst must render only its final query, got '+renders);
+   assert(document.querySelectorAll('[data-track]').length===1 && document.querySelector('[data-track="track-${count-1}"]'),'Latest search result is incorrect');
+   assert(document.activeElement===input && input.selectionStart===caret,'Filtering changed input focus or caret');
+   query('pending library query');window.__lag.navigate('storage');
+   const storagePage=document.querySelector('.storage-page');await wait();
+   assert(document.querySelector('.storage-page')===storagePage,'A pending search rebuilt the destination tab');
+   query('');await wait();
+   return {times,typingMs,oneRenderPerBurst:true,latestResult:true,inputFocus:true,cancelOnNavigation:true,sidebarRetained:true};
+ })()`);
+ const readsBeforeFilters=storageSummaryReads;
+ await win.webContents.executeJavaScript(`(async()=>{
+   const wait=()=>new Promise(r=>setTimeout(r,200));
+   const input=document.querySelector('#search');
+   for(const value of ['Song 000','no matching song','']){input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));await wait();}
+ })()`);
+ if(storageSummaryReads!==readsBeforeFilters)throw new Error('Filtering repeated the storage disk scan');
+ await win.webContents.executeJavaScript(`window.__lag.getState().tracks=[...window.__lag.getState().tracks];window.__lag.renderStorage();`);
+ await new Promise(r=>setTimeout(r,200));
+ if(storageSummaryReads!==readsBeforeFilters+1)throw new Error('A changed library failed to refresh disk usage');
+ result.navigationAndFilters.storageSummaryReused=true;
+ result.navigationAndFilters.storageSummaryInvalidated=true;
  result.accessibility={offscreenRowsInTree:true,recentNavigationInTree:true,rowActivation:true,keyboardNavigation:true,cardNavigation:true};
  result.volume={inputMs:volumeInputMs,burstSavedOnce:true,commitSavedOnce:true};
  result.startupMs=startupMs;result.count=count;result.label=label;

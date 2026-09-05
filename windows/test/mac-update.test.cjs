@@ -139,3 +139,63 @@ test("does not spawn a staged macOS installer after install authorization change
   assert.equal(result, false);
   assert.equal(spawned, false);
 });
+
+test("opts embedded development builds into the staged macOS updater", async () => {
+  let spawnOptions = null;
+  const result = await launchMacUpdateInstaller({
+    archivePath: "/tmp/Resonance-macOS.zip",
+    destinationPath: "/Applications/Resonance.app",
+    helperPath: "/app/install-update.sh",
+    version: "1.2.3",
+    environment: {
+      PATH: "/usr/bin:/bin",
+      RESONANCE_ALLOW_UNVERIFIED_UPDATES: "external-value-is-not-authoritative",
+    },
+    allowDevelopmentUpdates: true,
+    fsImpl: {
+      async mkdtemp() { return "/tmp/resonance-update-test"; },
+      async copyFile() {},
+      async chmod() {},
+      async rm() {},
+    },
+    spawnImpl(_command, _arguments, options) {
+      spawnOptions = options;
+      return { unref() {} };
+    },
+  });
+
+  assert.equal(result, true);
+  assert.equal(spawnOptions.env.PATH, "/usr/bin:/bin");
+  assert.equal(spawnOptions.env.RESONANCE_ALLOW_UNVERIFIED_UPDATES, "1");
+});
+
+test("does not accept an external unsigned macOS updater opt-in", async () => {
+  let spawnOptions = null;
+  const result = await launchMacUpdateInstaller({
+    archivePath: "/tmp/Resonance-macOS.zip",
+    destinationPath: "/Applications/Resonance.app",
+    helperPath: "/app/install-update.sh",
+    version: "1.2.3",
+    environment: { RESONANCE_ALLOW_UNVERIFIED_UPDATES: "1" },
+    fsImpl: {
+      async mkdtemp() { return "/tmp/resonance-update-test"; },
+      async copyFile() {},
+      async chmod() {},
+      async rm() {},
+    },
+    spawnImpl(_command, _arguments, options) {
+      spawnOptions = options;
+      return { unref() {} };
+    },
+  });
+
+  assert.equal(result, true);
+  assert.equal("RESONANCE_ALLOW_UNVERIFIED_UPDATES" in spawnOptions.env, false);
+});
+
+test("allows development macOS builds to update without weakening production builds", async () => {
+  const source = await fs.readFile(path.join(__dirname, "../../mac/scripts/install-update.sh"), "utf8");
+  assert.match(source, /production:production\|development:development\|development:production/);
+  assert.doesNotMatch(source, /production:development/);
+  assert.match(source, /case "\$NEW_MODE" in[\s\S]+codesign --verify --deep --strict -R="\$CURRENT_REQUIREMENT" "\$NEW_APP"/);
+});

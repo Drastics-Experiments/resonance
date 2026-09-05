@@ -112,7 +112,10 @@ let disposeRecentCards = null;
 let disposeFullPlayerQueue = null;
 let disposeAddSongsRows = null;
 let closeStorageImportMenu = null;
+let pendingSearchRender = null;
 function disposeContentView() {
+  clearTimeout(pendingSearchRender);
+  pendingSearchRender = null;
   closeStorageImportMenu?.();
   closeStorageImportMenu = null;
   disposeContentRows?.();
@@ -791,7 +794,8 @@ function persistentPlaybackQueueIDs(trackIDs) {
 
 const currentTrack = () => playbackTrackByID(currentID);
 const playlistTracks = (indexes = null) => selectedPlaylistID
-  ? tracksForPlaylist(state, selectedPlaylistID, serverCatalog, indexes).filter((track) => trackBelongsToActiveProfile(state, track))
+  ? tracksForPlaylist(state, selectedPlaylistID, serverCatalog, indexes).filter((track) =>
+    indexes && !track.playlistUnavailable ? indexes.activeTrackSet.has(track) : trackBelongsToActiveProfile(state, track))
   : indexes?.activeTracks ?? tracksForActiveProfile(state);
 const activeRemoteTrack = (remoteID) => state.tracks.find((track) => track.remoteID === remoteID && trackBelongsToActiveProfile(state, track));
 const activeProfile = () => state.syncProfiles.find((profile) => profile.id === activeProfileID())
@@ -1039,9 +1043,8 @@ function updatePlaylistDragPreview(targetRow, insertAfter = false) {
 function clearPlaylistPointerDrag() {
   const drag = playlistPointerDrag;
   playlistPointerDrag = null;
-  if (drag?.pointerID != null) {
-    const sourceRow = document.querySelector(`[data-playlist-entry="${CSS.escape(drag.sourceID)}"]`);
-    if (sourceRow?.hasPointerCapture(drag.pointerID)) sourceRow.releasePointerCapture(drag.pointerID);
+  if (drag?.pointerID != null && drag.captureTarget?.hasPointerCapture(drag.pointerID)) {
+    drag.captureTarget.releasePointerCapture(drag.pointerID);
   }
   draggingPlaylistTrackID = null;
   draggingPlaylistTargetID = null;
@@ -2626,7 +2629,7 @@ function updateTopSearch() {
   const sort = $("#searchSort");
   document.querySelector(".top-search-group").hidden = section === "settings";
   updateProfileControl();
-  input.value = currentSearchQuery();
+  if (input.value !== currentSearchQuery()) input.value = currentSearchQuery();
   input.placeholder = currentSearchPlaceholder();
   input.setAttribute("aria-label", currentSearchPlaceholder());
   if (section === "storage") {
@@ -4341,12 +4344,14 @@ function formatBytes(value) {
 }
 
 function storageTracks() {
+  const query = storageQuery.toLocaleLowerCase();
   let tracks = tracksForActiveProfile(state).filter((track) => {
     const storageClass = physicalStorageClassForTrack(track);
     if (storageScope === "downloads" && storageClass !== "downloads") return false;
     if (storageScope === "files" && storageClass === "downloads") return false;
+    if (!query) return true;
     const haystack = `${track.title || ""} ${track.artist || ""} ${track.album || ""} ${track.filePath || ""}`.toLocaleLowerCase();
-    return haystack.includes(storageQuery.toLocaleLowerCase());
+    return haystack.includes(query);
   });
   tracks = [...tracks].sort((left, right) => {
     if (storageSort === "size") return (right.size || 0) - (left.size || 0);
@@ -4437,6 +4442,21 @@ async function deleteStoredTracks(trackIDs, { deleteExternal = false } = {}) {
   } else if (deleted.some((track) => physicalStorageClassForTrack(track) === "external") && !deleteExternal) {
     showNotice("Removed from Resonance. The original files remain where you keep them.", "status");
   }
+}
+
+let storageSummaryRequest = null;
+function loadStorageSummary() {
+  const tracks = state.tracks;
+  if (storageSummaryRequest?.tracks === tracks
+    && storageSummaryRequest.count === tracks.length
+    && performance.now() - storageSummaryRequest.started < 10000) return storageSummaryRequest.promise;
+  const request = { tracks, count: tracks.length, started: performance.now() };
+  request.promise = api.storageSummary().catch((error) => {
+    if (storageSummaryRequest === request) storageSummaryRequest = null;
+    throw error;
+  });
+  storageSummaryRequest = request;
+  return request.promise;
 }
 
 function renderStorage() {
@@ -4541,8 +4561,9 @@ function renderStorage() {
   if ($("#deleteSelectedStorage")) $("#deleteSelectedStorage").onclick = async () => {
     if (selectedStorageIDs.size && confirm(`Delete ${selectedStorageIDs.size} selected file${selectedStorageIDs.size === 1 ? "" : "s"} from this device?`)) await deleteStoredTracks([...selectedStorageIDs], { deleteExternal: true });
   };
-  api.storageSummary().then((summary) => {
-    if (section !== "storage") return;
+  const renderedSummary = $("#storageSummary");
+  loadStorageSummary().then((summary) => {
+    if (!renderedSummary.isConnected) return;
     const local = $("#storageLocalBytes");
     const remote = $("#storageRemoteBytes");
     const ring = $("#storageRing");
@@ -4555,7 +4576,7 @@ function renderStorage() {
     if (available) available.textContent = formatBytes(summary.availableBytes);
     if (percent) percent.textContent = summary.capacityBytes ? `${Math.round(summary.availableBytes / summary.capacityBytes * 100)}% free` : "Disk space";
   }).catch((error) => {
-    if (section !== "storage") return;
+    if (!renderedSummary.isConnected) return;
     const available = $("#storageAvailable");
     const percent = $("#storageFreePercent");
     if (available) available.textContent = "Unavailable";
@@ -4900,6 +4921,7 @@ function filteredServerCatalog(activeRemoteIDs) {
     const onDevice = activeRemoteIDs.has(song.id);
     if (serverScope === "device" && !onDevice) return false;
     if (serverScope === "available" && onDevice) return false;
+    if (!query) return true;
     return `${song.title || song.name || ""} ${song.artist || ""} ${song.album || ""}`.toLocaleLowerCase().includes(query);
   }).sort((left, right) => {
     if (serverSort === "size") return (right.size || 0) - (left.size || 0);
@@ -5500,14 +5522,16 @@ function scheduleDiscordPresenceUpdate() {
   }, 80);
 }
 
-function render() {
+function render({ refreshCollections = true } = {}) {
   if (section === "library") renderLibrary();
   else if (section === "playlists") renderPlaylists();
   else if (section === "storage") renderStorage();
   else if (section === "server") renderServer();
   else renderLibrary();
-  renderSidebar();
-  renderQueue();
+  if (refreshCollections) {
+    renderSidebar();
+    renderQueue();
+  }
   $("#navBack").disabled = navigationIndex === 0;
   $("#navForward").disabled = navigationIndex + 1 >= navigationHistory.length;
   bindSquareArtworkImages();
@@ -5567,8 +5591,11 @@ function bindTrackRows(playbackTracks = playlistTracks(), root = document) {
           startX: event.clientX,
           startY: event.clientY,
           active: false,
+          captureTarget: primaryAction,
         };
-        row.setPointerCapture(event.pointerId);
+        // Keep the pointer attached through a drag without retargeting a
+        // normal click away from the full-row play button.
+        primaryAction.setPointerCapture(event.pointerId);
       };
       row.onpointermove = (event) => {
         const drag = playlistPointerDrag;
@@ -9125,8 +9152,7 @@ function applyNavigation(location) {
   if (location.section === "library" && location.playlistID !== selectedPlaylistID) libraryQuery = "";
   section = location.section;
   selectedPlaylistID = location.playlistID;
-  updateTopSearch();
-  setActiveNav(); render();
+  setActiveNav(); render({ refreshCollections: false });
 }
 
 function navigate(nextSection, playlistID = null) {
@@ -9676,10 +9702,13 @@ document.addEventListener("visibilitychange", () => {
 $("#search").oninput = () => {
   const query = $("#search").value;
   setCurrentSearchQuery(query);
-  if (section === "library") renderLibrary();
-  else if (section === "playlists") renderPlaylists();
-  else if (section === "storage") renderStorage();
-  else renderServer();
+  clearTimeout(pendingSearchRender);
+  // Keep text entry immediate, and render only the final edit in a typing
+  // burst. Any navigation or data-driven render cancels this pending work.
+  pendingSearchRender = setTimeout(() => {
+    pendingSearchRender = null;
+    render({ refreshCollections: false });
+  }, 60);
 };
 $("#searchSortButton").onclick = () => {
   const sort = $("#searchSort");

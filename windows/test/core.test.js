@@ -2516,6 +2516,7 @@ test("installs downloaded Windows updates silently in place", () => {
   assert.match(mainSource, /const verificationPromise = windowsUpdateVerificationPromise;[\s\S]+if \(verificationPromise\) await verificationPromise;[\s\S]+if \(!desktopUpdateChannel\.isCurrent\(generation\)\) return null/);
   assert.match(mainSource, /publishUpdateStatusForGeneration\(generation, "ready"/);
   assert.match(mainSource, /macUpdateArtifactGeneration !== generation/);
+  assert.match(mainSource, /allowDevelopmentUpdates: desktopPackage\.resonanceUpdateAuthenticity === "development"/);
   assert.match(mainSource, /authorizeInstall: \(\) => desktopUpdateChannel\.isCurrent\(generation\)/);
   assert.match(htmlSource, /Restart &amp; update/);
   assert.match(readmeSource, /runs the verified NSIS update silently/);
@@ -3441,7 +3442,17 @@ test("reorders playlist tracks before or after a drop target", () => {
   const appSource = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const styleSource = readFileSync(new URL("../ui/styles.css", import.meta.url), "utf8");
   assert.doesNotMatch(appSource, /row\.onmousedown\s*=/);
-  assert.match(appSource, /row\.onpointerdown = \(event\) => \{\s+if \(!event\.isPrimary[\s\S]+row\.setPointerCapture\(event\.pointerId\)/);
+  const pointerDownHandler = appSource.slice(
+    appSource.indexOf("row.onpointerdown = (event) => {"),
+    appSource.indexOf("row.onpointermove = (event) => {"),
+  );
+  const pointerMoveHandler = appSource.slice(
+    appSource.indexOf("row.onpointermove = (event) => {"),
+    appSource.indexOf("row.onpointerup = (event) => {"),
+  );
+  assert.doesNotMatch(pointerDownHandler, /row\.setPointerCapture/);
+  assert.match(pointerDownHandler, /captureTarget: primaryAction[\s\S]+primaryAction\.setPointerCapture\(event\.pointerId\)/);
+  assert.match(pointerMoveHandler, /if \(!drag\.active\)[\s\S]+drag\.active = true;[\s\S]+startPlaylistDragPreview/);
   assert.match(appSource, /function playlistDragDestination[\s\S]+playlistInsertionIndex\([\s\S]+row\.offsetTop/);
   assert.match(appSource, /row\.onpointermove = \(event\) => \{[\s\S]+playlistDragDestination\(trackTable, event\.clientY\)/);
   assert.match(appSource, /row\.onpointerup = \(event\) => \{[\s\S]+playlistDragDestination\(trackTable, event\.clientY\)/);

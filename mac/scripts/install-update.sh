@@ -40,9 +40,9 @@ case "$CURRENT_MODE" in
         UPDATE_AUTH_MODE=production
         ;;
     development)
-        # Ad-hoc signatures are accepted only for an explicitly opted-in
-        # development/test app. The production branch above never consults
-        # this environment variable.
+        # The main process supplies this opt-in only when its packaged metadata
+        # declares a development updater policy. The production branch above
+        # never consults this environment variable.
         [[ "${RESONANCE_ALLOW_UNVERIFIED_UPDATES:-0}" == "1" ]] || exit 65
         UPDATE_AUTH_MODE=development
         ;;
@@ -61,12 +61,22 @@ BUNDLE_VERSION="$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$INFO
 [[ "$BUNDLE_ID" == "$COMPATIBILITY_BUNDLE_ID" ]] || exit 65
 [[ "$BUNDLE_VERSION" == "$VERSION" ]] || exit 65
 NEW_MODE="$(/usr/bin/plutil -extract ResonanceUpdateAuthenticity raw "$INFO_PLIST" 2>/dev/null || true)"
-[[ "$NEW_MODE" == "$UPDATE_AUTH_MODE" ]] || exit 65
+case "$UPDATE_AUTH_MODE:$NEW_MODE" in
+    production:production|development:development|development:production) ;;
+    *) exit 65 ;;
+esac
 
-case "$UPDATE_AUTH_MODE" in
+case "$NEW_MODE" in
     production)
         NEW_TEAM_ID="$(/usr/bin/plutil -extract ResonanceUpdateTeamIdentifier raw "$INFO_PLIST" 2>/dev/null || true)"
         NEW_REQUIREMENT="$(/usr/bin/plutil -extract ResonanceUpdateDesignatedRequirement raw "$INFO_PLIST" 2>/dev/null || true)"
+        [[ "$NEW_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || exit 65
+        [[ -n "$NEW_REQUIREMENT" && "$NEW_REQUIREMENT" != *$'\n'* && "$NEW_REQUIREMENT" != *$'\r'* ]] || exit 65
+        # Even an ad-hoc installed app must already carry the independently
+        # trusted production pin. A downloaded bundle cannot nominate its own
+        # publisher; missing pins require a manual trusted installation.
+        [[ "$CURRENT_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || exit 65
+        [[ -n "$CURRENT_REQUIREMENT" && "$CURRENT_REQUIREMENT" != *$'\n'* && "$CURRENT_REQUIREMENT" != *$'\r'* ]] || exit 65
         [[ "$NEW_TEAM_ID" == "$CURRENT_TEAM_ID" ]] || exit 65
         [[ "$NEW_REQUIREMENT" == "$CURRENT_REQUIREMENT" ]] || exit 65
         NEW_SIGNATURE_DETAILS="$(/usr/bin/codesign --display --verbose=4 "$NEW_APP" 2>&1)" || exit 65

@@ -19,7 +19,24 @@ and replaces an existing installation atomically.
 
 Local builds and ordinary pull-request/main CI artifacts remain ad-hoc signed so
 contributors can build without Apple credentials. They are development artifacts
-and cannot be promoted by the release-candidate workflow.
+and cannot be promoted by the release-candidate workflow. Their embedded
+development updater policy allows in-app updates to another verified ad-hoc build.
+To move to a production-signed build, the installed development bundle must
+already pin the expected production team and designated requirement. The helper
+compares the candidate with those installed values and verifies its signature
+against the installed requirement, never a newly adopted candidate requirement.
+Production installations never accept an ad-hoc downgrade.
+
+For a development build that can transition to production, supply both
+`MAC_UPDATE_TEAM_ID` and `MAC_UPDATE_DESIGNATED_REQUIREMENT` from independently
+trusted signing configuration to `mac/scripts/build-electron.sh`. The build
+remains ad-hoc signed while embedding and checking those pins in its Info.plist.
+Partial or malformed pins fail packaging. Ordinary development builds without
+pins still accept ad-hoc updates; a signed transition is rejected without
+replacing the installed app and requires a manual trusted installation. Do not
+derive pins from a downloaded update, or commit signing identities or credentials.
+Ad-hoc updates still trust the release feed and its checksums; pinning production
+transitions does not independently authenticate that unsigned channel.
 
 A production candidate fails closed unless the Electron app has a timestamped
 Developer ID Application signature with hardened runtime, the PKG has a trusted

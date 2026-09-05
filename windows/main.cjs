@@ -939,6 +939,7 @@ autoUpdater.on("update-downloaded", (information) => {
       downloadedFile: information?.downloadedFile,
       currentExecutable: process.execPath,
       authenticityMode: desktopPackage.resonanceUpdateAuthenticity,
+      trustedPublisher: desktopPackage.resonanceUpdatePublisher,
       packaged: app.isPackaged,
     });
     if (!desktopUpdateChannel.isCurrent(generation)) return null;
@@ -1216,6 +1217,7 @@ async function installMacUpdate() {
     helperPath,
     processID: process.pid,
     version: manifest.version,
+    allowDevelopmentUpdates: desktopPackage.resonanceUpdateAuthenticity === "development",
     authorizeInstall: () => desktopUpdateChannel.isCurrent(generation)
       && macUpdateArtifactGeneration === generation
       && macUpdateManifest === manifest
