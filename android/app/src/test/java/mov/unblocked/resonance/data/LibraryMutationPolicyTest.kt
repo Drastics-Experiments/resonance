@@ -24,8 +24,8 @@ class LibraryMutationPolicyTest {
         assertEquals(setOf(keep.id), updated.favorites)
         assertEquals(
             listOf(
-                Playlist(name = "Liked Songs", isSystem = true),
-                Playlist(name = "Mix", trackIDs = listOf(keep.id)),
+                library.playlists[0].copy(trackIDs = emptyList()),
+                library.playlists[1].copy(trackIDs = listOf(keep.id)),
             ),
             updated.playlists,
         )

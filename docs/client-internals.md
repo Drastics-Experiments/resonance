@@ -36,6 +36,8 @@ without changing the presentation layer.
   the viewport. Row blocks retain their measured heights when unloaded; focused
   rows and active playlist drags stay mounted. Hidden queue panels do no rendering.
   Server artwork loads as rows approach the viewport.
+  Offscreen row groups retain screen-reader navigation buttons that mount and
+  focus their contents; Recently Added exposes previous/next navigation too.
 - `windows/metadata.cjs` deduplicates concurrent parses and caches unchanged file
   metadata with limits of 128 entries and 8 MiB of artwork strings. File identity,
   size, and modification/change timestamps invalidate cached results; failed

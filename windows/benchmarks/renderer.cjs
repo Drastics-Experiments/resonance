@@ -42,6 +42,26 @@ app.whenReady().then(async()=>{
  if(!await win.webContents.executeJavaScript('Boolean(window.__lag?.ready)'))throw new Error('Renderer failed to initialize');
  const startupMs=Date.now()-started;
  await new Promise(r=>setTimeout(r,500));
+ // Inspect Electron's accessibility tree, then exercise the controls it exposes.
+ win.webContents.debugger.attach('1.3');
+ const tree=await win.webContents.debugger.sendCommand('Accessibility.getFullAXTree');
+ win.webContents.debugger.detach();
+ const lastBlock=Math.floor((count-1)/25)*25;
+ if(!tree.nodes.some(node=>node.role?.value==='button'&&node.name?.value===`Show items ${lastBlock+1} through ${count} of ${count}`))throw new Error('Offscreen row navigation is absent from the accessibility tree');
+ if(!tree.nodes.some(node=>node.role?.value==='button'&&node.name?.value==='Show next items'))throw new Error('Recent-card navigation is absent from the accessibility tree');
+ await win.webContents.executeJavaScript(`(async()=>{
+   const wait=()=>new Promise(r=>setTimeout(r,250));
+   const assert=(condition,message)=>{if(!condition)throw new Error(message);};
+   document.querySelector('#libraryTrackRows > [data-start="${lastBlock}"] .sr-only').click();await wait();
+   assert(document.activeElement?.dataset.trackActivate==='track-${lastBlock}','Accessible row activation failed');
+   document.querySelector('#libraryTrackRows > [data-start="0"] .sr-only').focus();await wait();
+   assert(document.activeElement?.dataset.trackActivate==='track-0','Keyboard row navigation failed '+JSON.stringify({active:document.activeElement.outerHTML.slice(0,300),first:document.querySelector('#libraryTrackRows > [data-start="0"]').innerHTML.slice(0,300)}));
+   const recent=document.querySelector('.recent-track-list');
+   const last=Math.max(...[...recent.querySelectorAll('[data-recent-track]')].map(button=>Number(button.dataset.recentTrack.slice(6))));
+   [...recent.querySelectorAll('.sr-only')].find(button=>button.textContent==='Show next items').click();await wait();
+   assert(document.activeElement?.dataset.recentTrack==='track-'+(last+1),'Accessible card navigation failed');
+   document.activeElement.blur();recent.scrollLeft=0;window.__lag.renderLibrary();await wait();
+ })()`);
  const savesBeforeVolume=saveCount;
  const volumeInputMs=await win.webContents.executeJavaScript(`(()=>{
    const start=performance.now();const input=document.querySelector('#volume');
@@ -180,6 +200,7 @@ app.whenReady().then(async()=>{
  document.querySelector('#listeningHistoryDialog').close();
  return {sidebarMs,serverMs,historyCount,historyQueueMs,historyScreenMs,serverSelection:true,serverSearch:true,historyRanking:true,historyDayDetails:true};
  })()`);
+ result.accessibility={offscreenRowsInTree:true,recentNavigationInTree:true,rowActivation:true,keyboardNavigation:true,cardNavigation:true};
  result.volume={inputMs:volumeInputMs,burstSavedOnce:true,commitSavedOnce:true};
  result.startupMs=startupMs;result.count=count;result.label=label;
  await fs.writeFile(root+'/result.json',JSON.stringify(result,null,2));await fs.writeFile(root+'/screen.png',(await win.webContents.capturePage()).toPNG());
