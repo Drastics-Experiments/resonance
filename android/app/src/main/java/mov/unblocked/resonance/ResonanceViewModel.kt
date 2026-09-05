@@ -130,6 +130,7 @@ import mov.unblocked.resonance.data.SyncProfile
 import mov.unblocked.resonance.data.ProfilePictureStore
 import mov.unblocked.resonance.data.Track
 import mov.unblocked.resonance.data.TransferSessionOwnership
+import mov.unblocked.resonance.data.TrackIndexPolicy
 import mov.unblocked.resonance.data.associatedWithLocalSource
 import mov.unblocked.resonance.playback.PlaybackService
 import mov.unblocked.resonance.playback.DownloadPolicy
@@ -3189,11 +3190,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun applyingKnownRemoteSongMetadata(songs: List<RemoteSong>): List<RemoteSong> {
-        val localTracksByRemoteID = library.tracks.asSequence()
-            .filter(::trackBelongsToActiveContext)
-            .mapNotNull { track -> track.remoteID?.let { it to track } }
-            .distinctBy { it.first }
-            .toMap()
+        val localTracksByRemoteID = TrackIndexPolicy.byRemoteID(
+            tracks = library.tracks,
+            serverURL = library.serverURL,
+            profileID = library.syncProfileID,
+        )
         return songs.map { song ->
             if (!song.isMetadataLoading) return@map song
             if (song.requiresOriginalSourcePage) {
@@ -5386,12 +5387,18 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun remotePlaylist(playlist: Playlist): RemotePlaylist {
+        val activeTracksByID = TrackIndexPolicy.byID(library.tracks.filter(::trackBelongsToActiveContext))
+        val activeTracksByRemoteID = TrackIndexPolicy.byRemoteID(
+            tracks = library.tracks,
+            serverURL = library.serverURL,
+            profileID = library.syncProfileID,
+        )
         val ordered = playlist.trackIDs.mapNotNull { id ->
-            library.tracks.firstOrNull { it.id == id && trackBelongsToActiveContext(it) }?.remoteID
+            activeTracksByID[id]?.remoteID
         }.distinct()
         val previous = playlist.remoteSongIDs.orEmpty()
         val unresolved = previous.filter { remoteId ->
-            library.tracks.none { trackBelongsToActiveContext(it) && it.remoteID == remoteId }
+            remoteId !in activeTracksByRemoteID
         }
         return RemotePlaylist(
             playlist.id.lowercase(),
@@ -5403,13 +5410,17 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     private suspend fun applyRemotePlaylists(document: RemotePlaylistsDocument) {
         val existing = library.playlists.filterNot(Playlist::isSystem).associateBy(Playlist::id)
         val system = library.playlists.filter(Playlist::isSystem)
+        val tracksByID = TrackIndexPolicy.byID(library.tracks)
+        val activeTracksByRemoteID = TrackIndexPolicy.byRemoteID(
+            tracks = library.tracks,
+            serverURL = library.serverURL,
+            profileID = library.syncProfileID,
+        )
         val custom = document.playlists.map { remote ->
             val localOnly = existing[remote.id]?.trackIDs.orEmpty().filter { id ->
-                library.tracks.firstOrNull { it.id == id }?.let { it.remoteID == null && it.sourceServer == null } == true
+                tracksByID[id]?.let { it.remoteID == null && it.sourceServer == null } == true
             }
-            val downloaded = remote.songIDs.mapNotNull { remoteId ->
-                library.tracks.firstOrNull { trackBelongsToActiveContext(it) && it.remoteID == remoteId }?.id
-            }
+            val downloaded = remote.songIDs.mapNotNull { remoteId -> activeTracksByRemoteID[remoteId]?.id }
             Playlist(
                 id = remote.id,
                 name = remote.name,
@@ -5455,21 +5466,24 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         persistLibrary()
     }
 
-    private fun hydrateRemotePlaylists(value: StoredLibrary): StoredLibrary = value.copy(
-        playlists = value.playlists.map { playlist ->
-            if (playlist.isSystem || playlist.remoteSongIDs == null) playlist else {
+    private fun hydrateRemotePlaylists(value: StoredLibrary): StoredLibrary {
+        val tracksByID = TrackIndexPolicy.byID(value.tracks)
+        val activeTracksByRemoteID = TrackIndexPolicy.byRemoteID(
+            tracks = value.tracks,
+            serverURL = value.serverURL,
+            profileID = value.syncProfileID,
+        )
+        return value.copy(
+            playlists = value.playlists.map { playlist ->
+                if (playlist.isSystem || playlist.remoteSongIDs == null) return@map playlist
                 val localOnly = playlist.trackIDs.filter { id ->
-                    value.tracks.firstOrNull { it.id == id }?.let { it.remoteID == null && it.sourceServer == null } == true
+                    tracksByID[id]?.let { it.remoteID == null && it.sourceServer == null } == true
                 }
-                val downloaded = playlist.remoteSongIDs.mapNotNull { remoteId ->
-                    value.tracks.firstOrNull {
-                        RemoteTrackIdentityPolicy.matches(it, value.serverURL, value.syncProfileID, remoteId)
-                    }?.id
-                }
+                val downloaded = playlist.remoteSongIDs.mapNotNull { remoteId -> activeTracksByRemoteID[remoteId]?.id }
                 playlist.copy(trackIDs = PlaylistOrderPolicy.merge(playlist.trackIDs, downloaded, localOnly))
-            }
-        },
-    )
+            },
+        )
+    }
 
     /**
      * Older libraries recorded a remote song ID without always recording the
@@ -5534,10 +5548,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun migrateRemoteLikes(value: StoredLibrary): StoredLibrary {
+        val tracksByID = TrackIndexPolicy.byID(value.tracks)
         val remoteLikedSongIDs = value.remoteLikedSongIDs ?: value.favorites.mapNotNullTo(mutableSetOf()) { trackID ->
-            value.tracks.firstOrNull {
-                it.id == trackID && RemoteTrackIdentityPolicy.belongsToContext(it, value.serverURL, value.syncProfileID)
-            }?.remoteID
+            tracksByID[trackID]
+                ?.takeIf { RemoteTrackIdentityPolicy.belongsToContext(it, value.serverURL, value.syncProfileID) }
+                ?.remoteID
         }
         val dirtyRemoteLikeSongIDs = value.dirtyRemoteLikeSongIDs ?: if (value.likesDirty) {
             value.tracks.mapNotNullTo(mutableSetOf()) { track ->
@@ -5556,8 +5571,9 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun hydrateRemoteLikes(value: StoredLibrary): StoredLibrary {
+        val tracksByID = TrackIndexPolicy.byID(value.tracks)
         val localFavorites = value.favorites.filterTo(mutableSetOf()) { id ->
-            value.tracks.firstOrNull { it.id == id }?.let {
+            tracksByID[id]?.let {
                 it.remoteID == null && it.sourceServer == null
             } == true
         }
@@ -5571,17 +5587,7 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun updateRemoteSongIds(playlist: Playlist): Playlist {
-        val unresolved = playlist.remoteSongIDs.orEmpty().filter { remoteId ->
-            library.tracks.none { trackBelongsToActiveContext(it) && it.remoteID == remoteId }
-        }
-        val ordered = playlist.trackIDs.mapNotNull { id ->
-            library.tracks.firstOrNull { it.id == id && trackBelongsToActiveContext(it) }?.remoteID
-        }.distinct()
-        val updated = playlist.copy(remoteSongIDs = PlaylistOrderPolicy.merge(
-            playlist.remoteSongIDs.orEmpty(),
-            ordered,
-            unresolved,
-        ))
+        val updated = playlist.copy(remoteSongIDs = remotePlaylist(playlist).songIDs)
         return updated.copy(
             entryOrder = PlaylistEntryOrderPolicy.normalizedOrder(updated, library.tracks),
         )
@@ -5627,8 +5633,11 @@ class ResonanceViewModel(application: Application) : AndroidViewModel(applicatio
         val visibleTracks = library.tracks.filter {
             RemoteTrackIdentityPolicy.visibleInContext(it, library.serverURL, library.syncProfileID)
         }
-        val trackSizes = visibleTracks.associate { it.id to repository.fileForTrack(it).length() }
-        val filePaths = visibleTracks.associate { it.id to repository.fileForTrack(it).absolutePath }
+        // Resolve each media file once. This refresh runs after persistence and context changes,
+        // so avoiding duplicate File allocations and path lookups keeps large libraries cheap.
+        val trackFiles = visibleTracks.associate { it.id to repository.fileForTrack(it) }
+        val trackSizes = trackFiles.mapValues { (_, file) -> file.length() }
+        val filePaths = trackFiles.mapValues { (_, file) -> file.absolutePath }
         val artwork = visibleTracks.mapNotNull { track -> repository.artworkFile(track)?.takeIf(File::isFile)?.absolutePath?.let { track.id to it } }.toMap()
         val visibleClipRanges = visibleTracks.mapNotNull { track ->
             library.clipRanges[clipRangeKey(track)]?.let { track.id to it }

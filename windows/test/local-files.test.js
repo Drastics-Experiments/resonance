@@ -8,7 +8,6 @@ import {
   VIDEO_EXTENSIONS,
   createScopedMediaPathTrust,
   expandSelectedMediaFiles,
-  isPathWithin,
   isSupportedMediaFile,
 } from "../local-files.cjs";
 
@@ -67,13 +66,6 @@ test("external media trust is exact-path scoped and bounded", () => {
   assert.equal(trust.has(second), true);
   assert.equal(trust.has(third), true);
   assert.equal(trust.size, 2);
-});
-
-test("path containment does not treat a sibling with the same prefix as trusted", () => {
-  const root = path.resolve("/Users/example/Music");
-  assert.equal(isPathWithin(path.join(root, "Track.mp3"), root), true);
-  assert.equal(isPathWithin(path.join(`${root}-backup`, "Track.mp3"), root), false);
-  assert.equal(isPathWithin(root, root), true);
 });
 
 test("Electron local-file IPC exposes folder/video import plus safe reveal/delete controls", async () => {

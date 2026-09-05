@@ -164,25 +164,6 @@ function normalizeListenAlongResponse(payload, { role = null, fallbackCode = nul
   });
 }
 
-function projectListenAlongPosition(snapshot, serverTime, now = Date.now(), updatedAt = undefined) {
-  const normalized = canonicalListenAlongSnapshot(snapshot);
-  if (!normalized.is_playing) return normalized.position_seconds;
-  const observedServerTime = serverTimeMilliseconds(serverTime, Number(now));
-  const baseline = updatedAt === undefined ? observedServerTime : serverTimeMilliseconds(updatedAt, observedServerTime);
-  const elapsed = updatedAt === undefined
-    ? Math.max(0, (Number(now) - baseline) / 1000)
-    : Math.max(0, (observedServerTime - baseline) / 1000);
-  return canonicalListenAlongPosition(normalized.position_seconds + elapsed);
-}
-
-function isNewerListenAlongRevision(revision, previousRevision) {
-  try {
-    return canonicalListenAlongRevision(revision) > canonicalListenAlongRevision(previousRevision);
-  } catch {
-    return false;
-  }
-}
-
 function publicListenAlongEvent(response, sessionID) {
   const normalized = normalizeListenAlongResponse(response, { role: response?.role || "guest" });
   return Object.freeze({
@@ -211,7 +192,5 @@ module.exports = {
   canonicalListenAlongSnapshot,
   canonicalListenAlongTimestamp,
   normalizeListenAlongResponse,
-  projectListenAlongPosition,
-  isNewerListenAlongRevision,
   publicListenAlongEvent,
 };

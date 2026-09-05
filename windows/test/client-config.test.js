@@ -14,8 +14,6 @@ const {
   deriveCohortBucket,
   monotonicClientConfigRevision,
   resolveClientConfigModes,
-  resolveSameOriginURL,
-  sameOriginBearerHeaders,
   tokenFingerprint,
   validCachedClientConfig,
   verifyClientConfigResponse,
@@ -368,29 +366,6 @@ test("cached configs expire after 15 minutes and any corruption returns null", (
   assert.equal(validCachedClientConfig(record, { expected, token: TOKEN, now: NOW }), null);
   assert.equal(validCachedClientConfig({ ...record, raw_body_base64: "!!!!" }, { expected, token: TOKEN, now: NOW }), null);
   assert.equal(validCachedClientConfig({ ...record, stored_at: "tomorrow" }, { expected, token: TOKEN, now: NOW }), null);
-});
-
-test("bearer headers are available only for same-origin HTTP(S) resolver URLs", () => {
-  const origin = "https://music.example.test/base";
-  assert.equal(
-    resolveSameOriginURL("/api/v1/songs/song-a/media", origin),
-    "https://music.example.test/api/v1/songs/song-a/media",
-  );
-  assert.equal(resolveSameOriginURL("https://music.example.test:443/audio", origin), "https://music.example.test/audio");
-  for (const candidate of [
-    "https://cdn.example.test/audio",
-    "http://music.example.test/audio",
-    "https://user:password@music.example.test/audio",
-    "javascript:alert(1)",
-    "/audio#fragment",
-  ]) {
-    assert.equal(resolveSameOriginURL(candidate, origin), null, candidate);
-    assert.equal(sameOriginBearerHeaders(candidate, origin, TOKEN), null, candidate);
-  }
-  assert.deepEqual(sameOriginBearerHeaders("/audio/song-a", origin, TOKEN), {
-    url: "https://music.example.test/audio/song-a",
-    headers: { Authorization: `Bearer ${TOKEN}` },
-  });
 });
 
 test("verification failures use a typed error without including credentials", () => {

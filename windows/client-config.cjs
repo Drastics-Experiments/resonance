@@ -217,11 +217,6 @@ function exactBase64(value, expression, field, expectedBytes) {
   return decoded;
 }
 
-function contentDigestForBody(rawBody) {
-  const body = rawBytes(rawBody);
-  return `sha-256=:${createHash("sha256").update(body).digest("base64")}:`;
-}
-
 function signatureInput(audience, contentDigest) {
   if (!audience || typeof audience !== "object") fail("INVALID_CONTEXT", "Signature audience is required.");
   const origin = requireNonEmptyString(audience.origin, "audience.origin");
@@ -237,13 +232,6 @@ function signatureInput(audience, contentDigest) {
     String(appBuild),
     contentDigest,
   ].join("\n");
-}
-
-function signatureForBody({ audience, contentDigest, token }) {
-  const secret = requireNonEmptyString(token, "token");
-  return `v1=:${createHmac("sha256", Buffer.from(secret, "utf8"))
-    .update(signatureInput(audience, contentDigest), "utf8")
-    .digest("base64")}:`;
 }
 
 function exactBoolean(object, key, group) {
@@ -533,38 +521,6 @@ function validCachedClientConfig(record, { expected, token, now = Date.now() }) 
   }
 }
 
-function resolveSameOriginURL(candidate, serverOrigin) {
-  let origin;
-  let url;
-  try {
-    origin = canonicalOrigin(serverOrigin);
-    url = new URL(requireNonEmptyString(candidate, "candidate"), `${origin}/`);
-  } catch {
-    return null;
-  }
-  if (
-    url.origin !== origin
-    || (url.protocol !== "https:" && url.protocol !== "http:")
-    || url.username
-    || url.password
-    || url.hash
-  ) return null;
-  return url.href;
-}
-
-function sameOriginBearerHeaders(candidate, serverOrigin, token) {
-  const resolvedURL = resolveSameOriginURL(candidate, serverOrigin);
-  if (!resolvedURL) return null;
-  try {
-    return deepFreeze({
-      url: resolvedURL,
-      headers: Object.freeze({ Authorization: `Bearer ${requireNonEmptyString(token, "token")}` }),
-    });
-  } catch {
-    return null;
-  }
-}
-
 module.exports = {
   CLIENT_CONFIG_COHORT_BUCKETS,
   CLIENT_CONFIG_MAX_BYTES,
@@ -579,15 +535,11 @@ module.exports = {
   clientConfigRequestContext,
   canonicalClientConfigPlatform,
   configCacheKey,
-  contentDigestForBody,
   createClientConfigCacheRecord,
   deriveCohortBucket,
   monotonicClientConfigRevision,
   resolveClientConfigModes,
-  resolveSameOriginURL,
   safeClientConfig,
-  sameOriginBearerHeaders,
-  signatureForBody,
   signatureInput,
   tokenFingerprint,
   validCachedClientConfig,

@@ -6,10 +6,10 @@ const { createReadStream } = require("node:fs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { createLatestValueWriter, mapConcurrent } = require("./async-work.cjs");
 const { crashSafeReplace, crashSafeReplaceMirrored, readPrimaryOrBackup } = require("./crash-safe-file.cjs");
 const { DiscordRPCClient, validDiscordApplicationID } = require("./discord-rpc.cjs");
 const {
-  cachedConfigMeetsRevisionFloor,
   clientConfigRevisionFloor,
   commitClientConfigRecord,
   currentFloorSafeCachedConfig,
@@ -49,7 +49,7 @@ const {
   sanitizePersistedSourceIdentities,
   sanitizePersistedSourceIdentity,
 } = require("./provenance.cjs");
-const { readResponseJSON, readResponseText } = require("./response-body.cjs");
+const { readResponseBytes, readResponseJSON, readResponseText } = require("./response-body.cjs");
 const { createRenewablePolicyLease } = require("./policy-lease.cjs");
 const {
   SERVER_DOWNLOAD_ATTEMPTS,
@@ -204,7 +204,6 @@ const VIDEO_EXTENSIONS = LOCAL_VIDEO_EXTENSIONS;
 const SERVER_ARTWORK_TYPES = new Set(["image/avif", "image/gif", "image/jpeg", "image/png", "image/webp"]);
 const MAX_SERVER_ARTWORK_BYTES = 8 * 1024 * 1024;
 const MAX_PROFILE_PICTURE_SOURCE_BYTES = 32 * 1024 * 1024;
-const MAX_LOCAL_IMPORT_UPLOAD_BYTES = 256 * 1024 * 1024;
 const MAX_LOCAL_IMPORT_PREVIEW_BYTES = 32 * 1024 * 1024;
 const AUTOMATIC_UPDATE_CHECK_DELAY_MS = 10_000;
 const AUTOMATIC_UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
@@ -264,7 +263,10 @@ const pendingExternalImports = new Map();
 // carrying that selection is restored). This keeps arbitrary renderer paths
 // outside the managed roots from becoming a file-read capability.
 const trustedExternalMediaPaths = createScopedMediaPathTrust();
-let librarySaveQueue = Promise.resolve();
+const librarySaveQueue = createLatestValueWriter(async (serializedState) => {
+  const paths = await ensureDirectories();
+  await atomicWriteFile(paths.state, serializedState, "utf8");
+}, { prepare: (snapshot) => JSON.stringify(persistentLibraryState(snapshot), null, 2) });
 let credentialSaveQueue = Promise.resolve();
 let accountSessionSaveQueue = Promise.resolve();
 let accountSession = null;
@@ -1867,12 +1869,6 @@ function matchesServerOrigin(value, expectedOrigin) {
   }
 }
 
-async function authenticatedJSON(url, token, signal) {
-  const response = await fetchSameOrigin(url, url, { headers: { Authorization: `Bearer ${token}` }, signal });
-  if (!response.ok) throw await serverResponseError(response);
-  return readResponseJSON(response, MAX_SERVER_JSON_RESPONSE_BYTES, "Authenticated server response");
-}
-
 async function serverResponseError(response) {
   let message = "";
   let body = "";
@@ -2452,24 +2448,6 @@ ipcMain.handle("listen-along:copy-code", (event, value) => {
   return { copied: true };
 });
 
-async function responseBytesWithLimit(response, limit) {
-  const reader = response.body?.getReader();
-  if (!reader) return Buffer.alloc(0);
-  const chunks = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel();
-      throw new Error("Server artwork is too large.");
-    }
-    chunks.push(Buffer.from(value));
-  }
-  return Buffer.concat(chunks, total);
-}
-
 function createWindow() {
   const trustedRendererURL = pathToFileURL(path.join(__dirname, "ui", "index.html")).href;
   const window = new BrowserWindow({
@@ -2828,7 +2806,7 @@ ipcMain.handle("library:load", async () => {
     const localUploadSizes = new Set(storedTracks
       .filter((track) => !track?.remoteID && track?.contentSha256 && Number.isFinite(Number(track?.size)))
       .map((track) => Number(track.size)));
-    const tracks = await Promise.all(storedTracks.map(async (track) => {
+    const tracks = await mapConcurrent(storedTracks, 4, async (track) => {
       if (!track.filePath) {
         return publicTrack("", { ...track, available: false, missing: true, storageLocation: null });
       }
@@ -2853,7 +2831,7 @@ ipcMain.handle("library:load", async () => {
           storageLocation: storageLocationForPath(track.filePath),
         });
       }
-    }));
+    });
     stored.tracks = tracks.map((track) => {
       const sourceIdentity = sanitizePersistedSourceIdentity(track.sourceIdentity, { sourcePageURL: track.sourceURL });
       const sourceIdentities = sanitizePersistedSourceIdentities(track.sourceIdentities, sourceIdentity
@@ -2893,8 +2871,7 @@ ipcMain.handle("library:load", async () => {
   }
 });
 
-ipcMain.handle("library:save", async (_event, state) => {
-  const paths = await ensureDirectories();
+function persistentLibraryState(state) {
   const tracks = Array.isArray(state.tracks) ? state.tracks.filter(persistableLibraryTrack) : [];
   const persistentTrackIDs = new Set(tracks.map((track) => track.id).filter(Boolean));
   const safeState = {
@@ -2949,32 +2926,31 @@ ipcMain.handle("library:save", async (_event, state) => {
       ? state.completedMigrations.filter((item) => typeof item === "string" && item.length <= 100)
       : [],
   };
-  const save = librarySaveQueue
-    .catch(() => {})
-    .then(() => atomicWriteFile(paths.state, JSON.stringify(safeState, null, 2), "utf8"));
-  librarySaveQueue = save;
-  await save;
-  return true;
-});
+  return safeState;
+}
+
+// Validate and encode before accepting an IPC snapshot. Only the latest pending
+// serialized state is retained, and every accepted caller waits for its write.
+ipcMain.handle("library:save", (_event, state) => librarySaveQueue(state).then(() => true));
 
 ipcMain.handle("library:refresh-metadata", async (_event, value) => {
   const paths = await ensureDirectories();
   const managedRoots = [paths.local, paths.remote];
   const requested = Array.isArray(value) ? value.slice(0, 5_000) : [];
-  const results = [];
-  for (const item of requested) {
+  const results = await mapConcurrent(requested, 4, async (item) => {
     const id = boundedText(item?.id, 200);
     const filePath = typeof item?.filePath === "string" ? path.resolve(item.filePath) : "";
-    if (!id || !filePath || !rendererReadableMediaPath(filePath, managedRoots)) continue;
+    if (!id || !filePath || !rendererReadableMediaPath(filePath, managedRoots)) return null;
     try {
       const information = await fs.stat(filePath);
-      if (!information.isFile()) continue;
-      results.push({ id, metadata: await readAudioMetadata(filePath) });
+      if (!information.isFile()) return null;
+      return { id, metadata: await readAudioMetadata(filePath) };
     } catch {
       // A missing or unreadable file does not prevent the remaining library from refreshing.
+      return null;
     }
-  }
-  return results;
+  });
+  return results.filter(Boolean);
 });
 
 ipcMain.handle("library:video-frames", async (_event, value = {}) => {
@@ -3595,22 +3571,22 @@ ipcMain.handle("library:reveal", async (_event, value) => {
 ipcMain.handle("library:storage", async () => {
   const paths = await ensureDirectories();
   const sumDirectory = async (directory) => {
-    let total = 0;
-    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
-      if (!entry.isFile()) continue;
-      try { total += (await fs.stat(path.join(directory, entry.name))).size; } catch { /* file changed during scan */ }
-    }
-    return total;
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    const sizes = await mapConcurrent(entries, 4, async (entry) => {
+      if (!entry.isFile()) return 0;
+      try { return (await fs.stat(path.join(directory, entry.name))).size; }
+      catch { return 0; /* file changed during scan */ }
+    });
+    return sizes.reduce((total, size) => total + size, 0);
   };
   const sumTrustedExternalFiles = async () => {
-    let total = 0;
-    for (const filePath of trustedExternalMediaPaths.values()) {
+    const sizes = await mapConcurrent(trustedExternalMediaPaths.values(), 4, async (filePath) => {
       try {
         const information = await fs.stat(filePath);
-        if (information.isFile()) total += information.size;
-      } catch { /* an external original may have moved since import */ }
-    }
-    return total;
+        return information.isFile() ? information.size : 0;
+      } catch { return 0; /* an external original may have moved since import */ }
+    });
+    return sizes.reduce((total, size) => total + size, 0);
   };
   const [managedLocalBytes, remoteBytes, externalBytes, disk] = await Promise.all([
     sumDirectory(paths.local),
@@ -4037,11 +4013,7 @@ ipcMain.handle("server:artwork", async (_event, { baseURL, token, profileID, son
   if (!response.ok) throw await serverResponseError(response);
   const contentType = String(response.headers.get("content-type") || "").split(";", 1)[0].trim().toLocaleLowerCase();
   if (!SERVER_ARTWORK_TYPES.has(contentType)) throw new Error("Server returned an unsupported artwork format.");
-  const declaredLength = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_SERVER_ARTWORK_BYTES) {
-    throw new Error("Server artwork is too large.");
-  }
-  const bytes = await responseBytesWithLimit(response, MAX_SERVER_ARTWORK_BYTES);
+  const bytes = await readResponseBytes(response, MAX_SERVER_ARTWORK_BYTES, "Server artwork");
   return `data:${contentType};base64,${bytes.toString("base64")}`;
 });
 

@@ -1,3 +1,4 @@
+const { readResponseBytes } = require("./response-body.cjs");
 const {
   LocalImportError,
   parseYouTubeMusicSearch,
@@ -102,12 +103,9 @@ function allowedResponseURL(value, allowedHosts) {
   }
 }
 
-async function boundedBody(response, limit = MAX_DOCUMENT_BYTES) {
-  const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > limit) throw searchError("SEARCH_RESPONSE_TOO_LARGE", "A provider search response was too large.");
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.length > limit) throw searchError("SEARCH_RESPONSE_TOO_LARGE", "A provider search response was too large.");
-  return bytes;
+function boundedBody(response, limit = MAX_DOCUMENT_BYTES) {
+  return readResponseBytes(response, limit,
+    searchError("SEARCH_RESPONSE_TOO_LARGE", "A provider search response was too large."));
 }
 
 async function providerResponse(url, signal, fetchImpl, allowedHosts, accept) {

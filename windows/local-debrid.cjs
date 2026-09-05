@@ -1,3 +1,4 @@
+const { readResponseBytes } = require("./response-body.cjs");
 const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -101,27 +102,10 @@ function reviewedLookupHeaders(settings, clientContextHeaders) {
 }
 
 async function readJSONWithLimit(response) {
-  const declared = Number(response.headers.get("content-length") || 0);
-  if (declared > MAX_PROVIDER_JSON_BYTES) {
-    await response.body?.cancel().catch(() => undefined);
-    throw externalError("searching_candidates", "PROVIDER_RESPONSE_TOO_LARGE", "The server returned an oversized source response.");
-  }
-  if (!response.body) return {};
-  const reader = response.body.getReader();
-  const chunks = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > MAX_PROVIDER_JSON_BYTES) {
-      await reader.cancel().catch(() => undefined);
-      throw externalError("searching_candidates", "PROVIDER_RESPONSE_TOO_LARGE", "The server returned an oversized source response.");
-    }
-    chunks.push(Buffer.from(value));
-  }
-  if (!total) return {};
-  try { return JSON.parse(Buffer.concat(chunks, total).toString("utf8")); }
+  const bytes = await readResponseBytes(response, MAX_PROVIDER_JSON_BYTES,
+    externalError("searching_candidates", "PROVIDER_RESPONSE_TOO_LARGE", "The server returned an oversized source response."));
+  if (!bytes.length) return {};
+  try { return JSON.parse(bytes.toString("utf8")); }
   catch { throw externalError("searching_candidates", "INVALID_PROVIDER_RESPONSE", "The server returned invalid source information."); }
 }
 

@@ -1,3 +1,4 @@
+const { readResponseBytes } = require("./response-body.cjs");
 const SPOTIFY_ID = /^[A-Za-z0-9]{22}$/;
 const SPOTIFY_HOSTS = new Set([
   "open.spotify.com",
@@ -409,27 +410,7 @@ function parseSpotifyPlaylistEmbed(html, expectedPlaylistID) {
 }
 
 async function responseTextWithLimit(response, limit, error) {
-  const declared = Number(response.headers.get("content-length") || 0);
-  if (declared > limit) {
-    await response.body?.cancel().catch(() => undefined);
-    throw error;
-  }
-  const reader = response.body?.getReader();
-  if (!reader) return "";
-  const decoder = new TextDecoder();
-  let output = "";
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel().catch(() => undefined);
-      throw error;
-    }
-    output += decoder.decode(value, { stream: true });
-  }
-  return output + decoder.decode();
+  return new TextDecoder().decode(await readResponseBytes(response, limit, error));
 }
 
 function spotifyProviderFailure(response) {
@@ -442,8 +423,9 @@ function spotifyProviderFailure(response) {
   return importError("resolving_metadata", "SPOTIFY_PROVIDER_FAILED", "Spotify could not load that track.");
 }
 
-async function canonicalSpotifyTrack(value, signal, fetchImpl) {
-  const direct = spotifyTrackURL(value);
+async function canonicalSpotifySource(value, kind, signal, fetchImpl) {
+  const parseURL = kind === "playlist" ? spotifyPlaylistURL : spotifyTrackURL;
+  const direct = parseURL(value);
   if (direct) return direct;
   let current = spotifySourceURL(value);
   for (let redirects = 0; redirects <= 5; redirects += 1) {
@@ -458,52 +440,24 @@ async function canonicalSpotifyTrack(value, signal, fetchImpl) {
       const location = response.headers.get("location");
       await response.body?.cancel().catch(() => undefined);
       if (!location) {
-        throw importError("resolving_metadata", "SPOTIFY_INVALID_REDIRECT", "Spotify returned an invalid track link.");
+        throw importError("resolving_metadata", "SPOTIFY_INVALID_REDIRECT", `Spotify returned an invalid ${kind} link.`);
       }
       try { current = spotifySourceURL(new URL(location, current).toString()); }
       catch {
-        throw importError("resolving_metadata", "SPOTIFY_INVALID_REDIRECT", "Spotify returned an unsafe track redirect.");
+        throw importError("resolving_metadata", "SPOTIFY_INVALID_REDIRECT", `Spotify returned an unsafe ${kind} redirect.`);
       }
       continue;
     }
     if (!response.ok) throw spotifyProviderFailure(response);
-    const resolved = spotifyTrackURL(response.url || current.toString());
-    if (!resolved) throw importError("resolving_metadata", "SPOTIFY_INVALID_REDIRECT", "Spotify returned an invalid track link.");
+    const resolved = parseURL(response.url || current.toString());
+    if (!resolved) throw importError("resolving_metadata", "SPOTIFY_INVALID_REDIRECT", `Spotify returned an invalid ${kind} link.`);
     return resolved;
   }
-  throw importError("resolving_metadata", "SPOTIFY_TOO_MANY_REDIRECTS", "Spotify redirected the track link too many times.");
-}
-
-async function canonicalSpotifyPlaylist(value, signal, fetchImpl) {
-  const direct = spotifyPlaylistURL(value);
-  if (direct) return direct;
-  let current = spotifySourceURL(value);
-  for (let redirects = 0; redirects <= 5; redirects += 1) {
-    let response;
-    try {
-      response = await fetchImpl(current, { method: "HEAD", redirect: "manual", signal });
-    } catch (error) {
-      if (error?.name === "AbortError") throw error;
-      throw importError("resolving_metadata", "SPOTIFY_UNREACHABLE", "Spotify could not resolve that short link.");
-    }
-    if ([301, 302, 303, 307, 308].includes(response.status)) {
-      const location = response.headers.get("location");
-      await response.body?.cancel().catch(() => undefined);
-      if (!location) throw importError("resolving_metadata", "SPOTIFY_INVALID_REDIRECT", "Spotify returned an invalid playlist link.");
-      try { current = spotifySourceURL(new URL(location, current).toString()); }
-      catch { throw importError("resolving_metadata", "SPOTIFY_INVALID_REDIRECT", "Spotify returned an unsafe playlist redirect."); }
-      continue;
-    }
-    if (!response.ok) throw spotifyProviderFailure(response);
-    const resolved = spotifyPlaylistURL(response.url || current.toString());
-    if (!resolved) throw importError("resolving_metadata", "SPOTIFY_INVALID_REDIRECT", "Spotify returned an invalid playlist link.");
-    return resolved;
-  }
-  throw importError("resolving_metadata", "SPOTIFY_TOO_MANY_REDIRECTS", "Spotify redirected the playlist link too many times.");
+  throw importError("resolving_metadata", "SPOTIFY_TOO_MANY_REDIRECTS", `Spotify redirected the ${kind} link too many times.`);
 }
 
 async function resolveSpotifyTrack(value, signal, fetchImpl = fetch) {
-  const canonical = await canonicalSpotifyTrack(value, signal, fetchImpl);
+  const canonical = await canonicalSpotifySource(value, "track", signal, fetchImpl);
   const oEmbedURL = new URL("/oembed", canonical.url.origin);
   oEmbedURL.searchParams.set("url", canonical.url.toString());
   let response;
@@ -584,7 +538,7 @@ async function resolveSpotifyPlaylistItemArtwork(item, signal, fetchImpl) {
 }
 
 async function resolveSpotifyPlaylist(value, signal, fetchImpl = fetch) {
-  const canonical = await canonicalSpotifyPlaylist(value, signal, fetchImpl);
+  const canonical = await canonicalSpotifySource(value, "playlist", signal, fetchImpl);
   const oEmbedURL = new URL("/oembed", canonical.url.origin);
   oEmbedURL.searchParams.set("url", canonical.url.toString());
   let response;

@@ -48,7 +48,6 @@ const {
   preferredYouTubeArtworkURL,
   resolveYouTubeMetadata,
   resolveYouTubeAudio,
-  verifiedContentRange,
 } = youtube;
 
 test("selects the largest YouTube artwork regardless of provider array order", () => {
@@ -98,6 +97,44 @@ function spotifyEmbedFixture(overrides = {}) {
     props: { pageProps: { state: { data: { entity } } } },
   })}</script></html>`;
 }
+
+test("Spotify track and playlist short links preserve chunked Unicode metadata", async () => {
+  for (const kind of ["track", "playlist"]) {
+    const id = kind === "track" ? spotifyTrackID : spotifyPlaylistID;
+    const canonical = `https://open.spotify.com/${kind}/${id}`;
+    const resolve = kind === "track" ? core.resolveSpotifyTrack : resolveSpotifyPlaylist;
+    const requests = [];
+    const result = await resolve("https://spotify.link/example", undefined, async (input, options) => {
+      const url = new URL(input);
+      requests.push(url);
+      if (url.hostname === "spotify.link") {
+        assert.equal(options.method, "HEAD");
+        return new Response(null, { status: 302, headers: { location: canonical } });
+      }
+      if (options.method === "HEAD") return new Response(null);
+      if (url.pathname === "/oembed") {
+        const target = new URL(url.searchParams.get("url"));
+        const bytes = Buffer.from("\ufeff" + JSON.stringify({
+          provider_name: "Spotify", type: "rich", title: "Café 🎵",
+          html: `<iframe src="https://open.spotify.com/embed${target.pathname}"></iframe>`,
+        }));
+        return new Response(new ReadableStream({
+          start(controller) {
+            for (const byte of bytes) controller.enqueue(Uint8Array.of(byte));
+            controller.close();
+          },
+        }));
+      }
+      return new Response(spotifyEmbedFixture({
+        type: kind, id, title: "Café 🎵",
+        trackList: [{ uri: `spotify:track:${spotifyTrackID}`, title: "Song", subtitle: "Artist", entityType: "track" }],
+      }));
+    });
+    assert.equal(requests.length, kind === "track" ? 4 : 5);
+    assert.equal(result.sourceURL, canonical);
+    assert.equal(result.title, "Café 🎵");
+  }
+});
 
 test("accepts supported Spotify tracks and YouTube video or playlist URL shapes", () => {
   assert.equal(isSpotifyURL(`https://open.spotify.com/track/${spotifyTrackID}`), true);
@@ -1423,7 +1460,6 @@ test("verifies consecutive download ranges and deletes a mismatched partial file
     );
     assert.equal(result.sha256, createHash("sha256").update(bytes).digest("hex"));
     assert.deepEqual(await fs.readFile(destination), bytes);
-    assert.equal(verifiedContentRange("bytes 0-4/5", 0, 4, 5), 5);
 
     const failedPath = path.join(directory, "failed.m4a");
     await assert.rejects(downloadResolvedAudio(

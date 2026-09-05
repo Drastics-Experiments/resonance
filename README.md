@@ -2,6 +2,9 @@
 
 Resonance is a cross-platform music player. Windows and macOS share one Electron desktop implementation, while iOS and Android remain native clients.
 
+See [Client internals](docs/client-internals.md) for collection, persistence, and
+transfer boundaries, plus the reproducible library performance benchmark.
+
 ## Repository layout
 
 | Path | Purpose |

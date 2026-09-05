@@ -62,12 +62,6 @@ function compareWindowsReleaseCandidates(left, right) {
   return leftTag.tag === rightTag.tag ? 0 : leftTag.tag > rightTag.tag ? 1 : -1;
 }
 
-function selectNewestWindowsRelease(candidates) {
-  return [...(Array.isArray(candidates) ? candidates : [])]
-    .filter((candidate) => parseWindowsReleaseTag(candidate?.tag || candidate?.releaseTag))
-    .sort((left, right) => compareWindowsReleaseCandidates(right, left))[0] || null;
-}
-
 function releaseAssetURL(value, tag, assetName) {
   let url;
   try { url = new URL(String(value || "")); } catch { return null; }
@@ -195,5 +189,4 @@ module.exports = {
   parseWindowsUpdateManifest,
   resolveMacUpdateManifest,
   resolveWindowsUpdateFeed,
-  selectNewestWindowsRelease,
 };

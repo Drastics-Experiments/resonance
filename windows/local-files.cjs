@@ -36,14 +36,6 @@ function isSupportedMediaFile(value) {
   return MEDIA_EXTENSIONS.has(path.extname(candidate).toLowerCase());
 }
 
-function isPathWithin(filePath, root) {
-  const candidate = normalizedMediaPath(filePath);
-  const base = normalizedMediaPath(root);
-  if (!candidate || !base) return false;
-  const relative = path.relative(base, candidate);
-  return relative === "" || (!relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
-}
-
 function isHiddenName(name) {
   return typeof name === "string" && name.startsWith(".");
 }
@@ -73,7 +65,7 @@ async function expandSelectedMediaFiles(selectedPaths, {
 } = {}) {
   const roots = Array.isArray(selectedPaths) ? selectedPaths : [];
   const limit = Number.isSafeInteger(maxFiles) && maxFiles > 0 ? maxFiles : DEFAULT_MAX_FILES;
-  const files = new Map();
+  const files = new Set();
   const visitedDirectories = new Set();
 
   const visit = async (value, { root = false } = {}) => {
@@ -82,7 +74,7 @@ async function expandSelectedMediaFiles(selectedPaths, {
     const information = await statEntry(candidate, fsAPI);
     if (!information) return;
     if (information.isFile()) {
-      if (isSupportedMediaFile(candidate)) files.set(candidate, candidate);
+      if (isSupportedMediaFile(candidate)) files.add(candidate);
       return;
     }
     if (!information.isDirectory()) return;
@@ -113,14 +105,14 @@ async function expandSelectedMediaFiles(selectedPaths, {
 
 function createScopedMediaPathTrust({ maxEntries = DEFAULT_MAX_FILES } = {}) {
   const limit = Number.isSafeInteger(maxEntries) && maxEntries > 0 ? maxEntries : DEFAULT_MAX_FILES;
-  const trusted = new Map();
+  const trusted = new Set();
   return {
     add(paths) {
       for (const value of Array.isArray(paths) ? paths : [paths]) {
         const candidate = normalizedMediaPath(value);
         if (!candidate || !isSupportedMediaFile(candidate)) continue;
         trusted.delete(candidate);
-        trusted.set(candidate, true);
+        trusted.add(candidate);
       }
       while (trusted.size > limit) trusted.delete(trusted.keys().next().value);
       return trusted.size;
@@ -147,7 +139,6 @@ module.exports = {
   VIDEO_EXTENSIONS,
   createScopedMediaPathTrust,
   expandSelectedMediaFiles,
-  isPathWithin,
   isSupportedMediaFile,
   normalizedMediaPath,
 };

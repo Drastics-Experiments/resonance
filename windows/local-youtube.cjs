@@ -1,3 +1,4 @@
+const { readResponseBytes } = require("./response-body.cjs");
 const { createHash } = require("node:crypto");
 const fs = require("node:fs/promises");
 const { LocalImportError, youtubeVideoID } = require("./local-import-core.cjs");
@@ -110,27 +111,8 @@ async function fetchWithValidatedRedirects(source, options, isAllowed, fetchImpl
 }
 
 async function responseTextWithLimit(response, limit) {
-  const declared = Number(response.headers.get("content-length") || 0);
-  if (declared > limit) {
-    await response.body?.cancel().catch(() => undefined);
-    throw youtubeError("YOUTUBE_RESPONSE_TOO_LARGE", "YouTube returned an oversized playback response.");
-  }
-  const reader = response.body?.getReader();
-  if (!reader) return "";
-  const decoder = new TextDecoder();
-  let total = 0;
-  let output = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel().catch(() => undefined);
-      throw youtubeError("YOUTUBE_RESPONSE_TOO_LARGE", "YouTube returned an oversized playback response.");
-    }
-    output += decoder.decode(value, { stream: true });
-  }
-  return output + decoder.decode();
+  return new TextDecoder().decode(await readResponseBytes(response, limit,
+    youtubeError("YOUTUBE_RESPONSE_TOO_LARGE", "YouTube returned an oversized playback response.")));
 }
 
 async function writeAll(file, bytes) {
@@ -701,10 +683,6 @@ function verifiedContentRangeForKind(value, expectedStart, expectedEnd, expected
   return expectedEnd - expectedStart + 1;
 }
 
-function verifiedContentRange(value, expectedStart, expectedEnd, expectedTotal) {
-  return verifiedContentRangeForKind(value, expectedStart, expectedEnd, expectedTotal, "audio");
-}
-
 async function downloadResolvedMedia(resolved, destination, signal, onProgress = () => {}, fetchImpl = fetch, mediaKind = "audio") {
   const media = mediaKind === "video" ? "video" : "audio";
   const file = await fs.open(destination, "wx");
@@ -865,7 +843,6 @@ module.exports = {
   resolveYouTubeAudio,
   resolveYouTubeVideo,
   safeStreamingURL,
-  verifiedContentRange,
   writeAll,
   youtubePlaybackFailure,
 };

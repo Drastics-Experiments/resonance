@@ -1,3 +1,4 @@
+const { readResponseBytes } = require("./response-body.cjs");
 const { createHash } = require("node:crypto");
 const fs = require("node:fs/promises");
 const { LocalImportError } = require("./local-import-core.cjs");
@@ -135,27 +136,9 @@ async function fetchWithValidatedRedirects(source, options, isAllowed, fetchImpl
   throw soundCloudError("SOUNDCLOUD_TOO_MANY_REDIRECTS", "SoundCloud redirected the request too many times.", { stage });
 }
 
-async function responseBytesWithLimit(response, limit, stage = "resolving_metadata") {
-  const declared = Number(response.headers.get("content-length") || 0);
-  if (declared > limit) {
-    await response.body?.cancel().catch(() => undefined);
-    throw soundCloudError("SOUNDCLOUD_RESPONSE_TOO_LARGE", "SoundCloud returned an oversized response.", { stage });
-  }
-  const reader = response.body?.getReader();
-  if (!reader) return Buffer.alloc(0);
-  const chunks = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel().catch(() => undefined);
-      throw soundCloudError("SOUNDCLOUD_RESPONSE_TOO_LARGE", "SoundCloud returned an oversized response.", { stage });
-    }
-    chunks.push(Buffer.from(value));
-  }
-  return Buffer.concat(chunks, total);
+function responseBytesWithLimit(response, limit, stage = "resolving_metadata") {
+  return readResponseBytes(response, limit,
+    soundCloudError("SOUNDCLOUD_RESPONSE_TOO_LARGE", "SoundCloud returned an oversized response.", { stage }));
 }
 
 function providerFailure(response, resource = "source", stage = "resolving_metadata") {

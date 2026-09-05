@@ -1,3 +1,4 @@
+const { readResponseBytes } = require("./response-body.cjs");
 const MAX_SERVER_UPLOAD_RESPONSE_BYTES = 256 * 1024;
 
 class ServerUploadResponseError extends Error {
@@ -82,36 +83,10 @@ function sanitizedUploadSong(value, serverOrigin) {
   };
 }
 
-async function responseBytesWithLimit(response, maximumBytes = MAX_SERVER_UPLOAD_RESPONSE_BYTES) {
-  const declaredLength = Number(response.headers?.get?.("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
-    await response.body?.cancel?.().catch(() => undefined);
-    throw new ServerUploadResponseError("The server upload response was too large.", response.status);
-  }
-  const reader = response.body?.getReader?.();
-  if (!reader) return Buffer.alloc(0);
-  const chunks = [];
-  let total = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maximumBytes) {
-        await reader.cancel().catch(() => undefined);
-        throw new ServerUploadResponseError("The server upload response was too large.", response.status);
-      }
-      chunks.push(Buffer.from(value));
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  return Buffer.concat(chunks, total);
-}
-
 async function readServerUploadResponse(response, options = {}) {
   const serverOrigin = new URL(options.serverOrigin).origin;
-  const rawBody = await responseBytesWithLimit(response);
+  const rawBody = await readResponseBytes(response, MAX_SERVER_UPLOAD_RESPONSE_BYTES,
+    new ServerUploadResponseError("The server upload response was too large.", response.status));
   const contentType = String(response.headers?.get?.("content-type") || "")
     .split(";", 1)[0]
     .trim()

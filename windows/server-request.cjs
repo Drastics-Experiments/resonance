@@ -14,26 +14,6 @@ function httpURL(value, label) {
   return url;
 }
 
-function cancelResponseBody(response) {
-  try {
-    const result = response?.body?.cancel?.();
-    return result && typeof result.then === 'function' ? result.catch(() => undefined) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function redirectMethod(status, method, headers) {
-  const normalizedMethod = String(method || 'GET').toUpperCase();
-  if (![301, 302, 303].includes(status) || ['GET', 'HEAD'].includes(normalizedMethod)) {
-    return { method: normalizedMethod, headers };
-  }
-  const nextHeaders = new Headers(headers);
-  nextHeaders.delete('content-length');
-  nextHeaders.delete('content-type');
-  return { method: 'GET', headers: nextHeaders, body: undefined };
-}
-
 /**
  * Fetch an HTTP(S) resource without ever forwarding request credentials to a
  * different origin. Fetch's automatic redirect handling is deliberately
@@ -55,7 +35,7 @@ async function fetchSameOrigin(baseURL, requestURL, options = {}, {
 
   let method = String(options.method || (options.body === undefined || options.body === null ? 'GET' : 'POST')).toUpperCase();
   let body = options.body;
-  let headers = new Headers(options.headers || {});
+  const headers = new Headers(options.headers || {});
   const initialHeaders = options.headers;
   for (let redirectCount = 0; ; redirectCount += 1) {
     const requestOptions = {
@@ -74,33 +54,34 @@ async function fetchSameOrigin(baseURL, requestURL, options = {}, {
     const response = await fetchImpl(current, requestOptions);
     if (!REDIRECT_STATUSES.has(response.status)) return response;
 
-    const location = response.headers?.get?.('location');
-    if (!location) {
-      await cancelResponseBody(response);
-      throw new Error('The server returned a redirect without a Location header.');
-    }
-    if (redirectCount >= maxRedirects) {
-      await cancelResponseBody(response);
-      throw new Error('The server redirected the request too many times.');
-    }
-
-    let next;
     try {
-      next = httpURL(new URL(location, current), 'Server redirect URL');
-    } catch (error) {
-      await cancelResponseBody(response);
-      throw new Error(`The server returned an unsafe redirect: ${error.message}`);
+      const location = response.headers?.get?.('location');
+      if (!location) {
+        throw new Error('The server returned a redirect without a Location header.');
+      }
+      if (redirectCount >= maxRedirects) {
+        throw new Error('The server redirected the request too many times.');
+      }
+      let next;
+      try {
+        next = httpURL(new URL(location, current), 'Server redirect URL');
+      } catch (error) {
+        throw new Error(`The server returned an unsafe redirect: ${error.message}`);
+      }
+      if (next.origin !== base.origin) {
+        throw new Error('The server returned a cross-origin redirect.');
+      }
+      if ([301, 302, 303].includes(response.status) && !['GET', 'HEAD'].includes(method)) {
+        method = 'GET';
+        body = undefined;
+        headers.delete('content-length');
+        headers.delete('content-type');
+      }
+      current = next;
+    } finally {
+      try { await response.body?.cancel(); }
+      catch { /* A failed cancellation must not hide the redirect result. */ }
     }
-    if (next.origin !== base.origin) {
-      await cancelResponseBody(response);
-      throw new Error('The server returned a cross-origin redirect.');
-    }
-    await cancelResponseBody(response);
-    const redirected = redirectMethod(response.status, method, headers);
-    method = redirected.method;
-    headers = redirected.headers;
-    if (Object.hasOwn(redirected, 'body')) body = redirected.body;
-    current = next;
   }
 }
 

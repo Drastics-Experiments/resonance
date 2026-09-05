@@ -12,6 +12,8 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test",
+    "benchmark:library": "node benchmarks/library.mjs",
+    "benchmark:renderer": "electron benchmarks/renderer.cjs",
     "preview:tailscale": "node remote-preview-server.mjs --tailscale",
     "package:win": "electron-builder --dir --win --x64 --publish never --config.directories.output=dist --config.extraMetadata.resonanceUpdateAuthenticity=unsigned",
     "installer:win": "electron-builder --win nsis --x64 --publish never --config.extraMetadata.resonanceUpdateAuthenticity=unsigned",
@@ -37,6 +39,7 @@
     },
     "files": [
       "main.cjs",
+      "async-work.cjs",
       "local-import-core.cjs",
       "local-debrid.cjs",
       "local-import-platform.cjs",
