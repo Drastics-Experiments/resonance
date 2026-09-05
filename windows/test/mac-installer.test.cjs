@@ -14,6 +14,36 @@ const team = 'ABCDEFGHIJ';
 const requirement = 'identifier "com.gavindietrich.LikedSongsFocus" and anchor apple generic';
 const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 
+installerTest('macOS packaging embeds optional development pins without enabling production signing', async () => {
+  const source = await fs.readFile(path.join(__dirname, '../../mac/scripts/build-electron.sh'), 'utf8');
+  // Execute the build script's actual policy validation and argument assembly,
+  // without running platform packaging tools or reading signing credentials.
+  const validation = source.slice(source.indexOf('MAC_UPDATE_AUTHENTICITY='), source.indexOf('\ncd "$WINDOWS_DIR"'));
+  const config = source.slice(source.indexOf('UPDATE_CONFIG_ARGS=('), source.indexOf('\n"$WINDOWS_DIR/node_modules/.bin/electron-builder"'));
+  assert.ok(validation && config);
+  const args = async (mode, teamID = '', designatedRequirement = '') => {
+    const result = await exec('/bin/bash', ['-c', `set -euo pipefail\n${validation}\n${config}\nprintf '%s\\0' "\${UPDATE_CONFIG_ARGS[@]}"`], {
+      timeout:10000,
+      env:{...process.env, MAC_UPDATE_AUTHENTICITY:mode, MAC_UPDATE_TEAM_ID:teamID, MAC_UPDATE_DESIGNATED_REQUIREMENT:designatedRequirement},
+    });
+    return result.stdout.split('\0').filter(Boolean);
+  };
+  const development = await args('development', team, requirement);
+  assert.ok(development.includes('--config.mac.identity=-'));
+  assert.ok(development.includes('--config.mac.extendInfo.ResonanceUpdateTeamIdentifier=' + team));
+  assert.ok(development.includes('--config.mac.extendInfo.ResonanceUpdateDesignatedRequirement=' + requirement));
+  assert.ok(development.includes('--config.extraMetadata.resonanceUpdateAuthenticity=development'));
+  const unpinned = await args('development');
+  assert.ok(unpinned.includes('--config.mac.identity=-'));
+  assert.ok(!unpinned.some(value => value.includes('ResonanceUpdateTeamIdentifier')));
+  const production = await args('production', team, requirement);
+  assert.ok(!production.includes('--config.mac.identity=-'));
+  for (const [mode, teamID, designatedRequirement] of [
+    ['production', '', ''], ['development', team, ''], ['development', '', requirement],
+    ['development', 'invalid', requirement], ['development', team, requirement + '\nanchor apple'],
+  ]) await assert.rejects(args(mode, teamID, designatedRequirement), error => error.code === 64);
+});
+
 // Execute the actual shell installer with only macOS platform utilities mocked.
 // This checks policy decisions and filesystem replacement on any Node CI host;
 // real Apple signature validation still requires the native macOS build checks.
@@ -46,7 +76,7 @@ function metadata(mode, version, overrides = {}) {
     CFBundleIdentifier: 'com.gavindietrich.LikedSongsFocus',
     CFBundleShortVersionString: version,
     ResonanceUpdateAuthenticity: mode,
-    ...(mode === 'production' ? {
+    ...(['production', 'development'].includes(mode) ? {
       ResonanceUpdateTeamIdentifier: team,
       ResonanceUpdateDesignatedRequirement: requirement,
     } : {}),
@@ -110,11 +140,33 @@ for (const [name, from, to, overrides, optIn] of [
   ['mismatched signature team', 'development', 'production', {fixtureTeam:'ZZZZZZZZZZ'}, '1'],
   ['changed production team', 'production', 'production', {ResonanceUpdateTeamIdentifier:'ZZZZZZZZZZ'}, '1'],
   ['changed production requirement', 'production', 'production', {ResonanceUpdateDesignatedRequirement:'anchor apple'}, '1'],
+  ['unrelated signed publisher on development upgrade', 'development', 'production', {
+    ResonanceUpdateTeamIdentifier:'ZZZZZZZZZZ', fixtureTeam:'ZZZZZZZZZZ',
+    ResonanceUpdateDesignatedRequirement:'identifier "com.gavindietrich.LikedSongsFocus" and certificate leaf[subject.OU] = "ZZZZZZZZZZ"',
+  }, '1'],
+  ['changed pinned requirement on development upgrade', 'development', 'production', {ResonanceUpdateDesignatedRequirement:'anchor apple'}, '1'],
 ]) {
   installerTest(`macOS installer preserves installed app on ${name}`, async t => {
     const current = metadata(from, '2.0.0');
     const result = await install(t, current, metadata(to, '2.0.1', overrides), optIn);
     assert.notEqual(result.code, 0);
     assert.deepEqual(result.adopted, current);
+  });
+}
+
+for (const [name, overrides] of [
+  ['missing pin', {ResonanceUpdateTeamIdentifier:null, ResonanceUpdateDesignatedRequirement:null}],
+  ['missing team', {ResonanceUpdateTeamIdentifier:null}],
+  ['missing requirement', {ResonanceUpdateDesignatedRequirement:null}],
+  ['invalid team', {ResonanceUpdateTeamIdentifier:'invalid'}],
+  ['multiline requirement', {ResonanceUpdateDesignatedRequirement:requirement + '\nanchor apple'}],
+]) {
+  installerTest(`macOS development updater rejects signed upgrades with ${name} but still accepts ad-hoc updates`, async t => {
+    const current = metadata('development', '2.0.0', overrides);
+    const rejected = await install(t, current, metadata('production', '2.0.1'));
+    assert.notEqual(rejected.code, 0);
+    assert.deepEqual(rejected.adopted, current);
+    const accepted = await install(t, current, metadata('development', '2.0.1', overrides));
+    assert.equal(accepted.code, 0);
   });
 }

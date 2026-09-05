@@ -403,6 +403,7 @@ test("uses the immutable packaged update policy for explicitly unsigned Windows 
     currentSignature: unsigned,
     updateSignature: signed,
     authenticityMode: "unsigned",
+    trustedPublisher: signed,
   }), {
     authenticityMode: "unsigned",
     verified: true,
@@ -446,6 +447,43 @@ test("uses the immutable packaged update policy for explicitly unsigned Windows 
     requirePublisher: true,
     exception: null,
   });
+});
+
+test("unsigned Windows upgrades require an independently pinned signed publisher", async () => {
+  const unsigned = { status: "NotSigned" };
+  const trustedPublisher = {
+    subject: "CN=Resonance Test Publisher",
+    issuer: "CN=Test Certificate Authority",
+    thumbprint: "a".repeat(40),
+  };
+  const signed = { status: "Valid", ...trustedPublisher };
+  const verify = (candidate, pin = trustedPublisher) => verifyDownloadedWindowsUpdate({
+    downloadedFile: "update.exe",
+    currentExecutable: "installed.exe",
+    authenticityMode: "unsigned",
+    trustedPublisher: pin,
+    readSignature: async file => path.basename(file) === "installed.exe" ? unsigned : candidate,
+  });
+  assert.equal((await verify(signed)).verified, true);
+  for (const difference of [
+    { subject: "CN=Unrelated Publisher" },
+    { issuer: "CN=Unrelated Authority" },
+    { thumbprint: "b".repeat(40) },
+    { subject: "CN=Unrelated Publisher", issuer: "CN=Unrelated Authority", thumbprint: "b".repeat(40) },
+  ]) {
+    await assert.rejects(verify({ ...signed, ...difference }), /pinned publisher identity/i);
+  }
+  for (const pin of [null, {}, [], "publisher", { ...trustedPublisher, thumbprint: "invalid" },
+    { ...trustedPublisher, subject: "x".repeat(2049) }]) {
+    await assert.rejects(verify(signed, pin), /no valid pinned.*publisher/i);
+    // Missing or malformed pins must not disable explicit unsigned updates.
+    assert.equal((await verify(unsigned, pin)).authenticode, false);
+  }
+  assert.throws(() => verifyWindowsUpdatePublisher({
+    currentSignature: unsigned, updateSignature: signed, authenticityMode: "unsigned",
+    environment: { RESONANCE_UPDATE_PUBLISHER: JSON.stringify(trustedPublisher) },
+  }), /no valid pinned.*publisher/i);
+  await assert.rejects(verify({ ...signed, status: "HashMismatch" }), /neither explicitly unsigned/i);
 });
 
 test("downloads require exact declared size and SHA-256 before adoption", async (t) => {
@@ -658,6 +696,7 @@ test("Windows renderer and main-process integrations retain the hardening bounda
   const packageJSON = JSON.parse(packageSource);
   const retiredStorageName = ["Liked", " Songs"].join("");
 
+  assert.match(mainSource, /verifyDownloadedWindowsUpdate\(\{[\s\S]*?trustedPublisher: desktopPackage\.resonanceUpdatePublisher,/);
   assert.match(mainSource, /normalizeServerBaseURL\(value, \{ allowInsecureLoopback: !app\.isPackaged \}\)/);
   assert.match(mainSource, /writeResponseToFile\(response, temporary,[\s\S]+expectedSize,[\s\S]+expectedSHA256,[\s\S]+maximumBytes: MAX_SERVER_MEDIA_BYTES/);
   assert.match(mainSource, /ipcMain\.handle\("library:load"[\s\S]+available: false,[\s\S]+missing: true,[\s\S]+stored\.tracks = tracks/);

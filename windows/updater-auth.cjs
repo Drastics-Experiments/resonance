@@ -27,6 +27,23 @@ function canonicalAuthenticodeSignature(value) {
   return Object.freeze({ status, subject, issuer, thumbprint });
 }
 
+function canonicalTrustedPublisher(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  // Pins are build-time identities, not display text. Never truncate an
+  // invalid pin into a different identity that could accidentally match.
+  for (const field of ["subject", "issuer"]) {
+    if (typeof value[field] !== "string" || !value[field].trim() || value[field].trim().length > 2048) return null;
+  }
+  if (typeof value.thumbprint !== "string") return null;
+  return canonicalAuthenticodeSignature({
+    status: "Valid", subject: value.subject, issuer: value.issuer, thumbprint: value.thumbprint,
+  });
+}
+
+function samePublisher(left, right) {
+  return left.thumbprint === right.thumbprint && left.subject === right.subject && left.issuer === right.issuer;
+}
+
 function unsignedAuthenticodeSignature(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const status = boundedSignatureText(value.status || value.Status, 64);
@@ -75,6 +92,7 @@ function verifyWindowsUpdatePublisher({
   currentSignature,
   updateSignature,
   authenticityMode,
+  trustedPublisher,
   packaged = true,
   environment = process.env,
 } = {}) {
@@ -101,6 +119,11 @@ function verifyWindowsUpdatePublisher({
     }
     const update = canonicalAuthenticodeSignature(updateSignature);
     if (!update) throw new Error("The Windows update is neither explicitly unsigned nor Authenticode-signed by a valid certificate.");
+    // Only the installed package can supply this pin. The release manifest,
+    // candidate signature and runtime environment cannot establish trust.
+    const expected = canonicalTrustedPublisher(trustedPublisher);
+    if (!expected) throw new Error("This unsigned Windows build has no valid pinned production publisher. Install a trusted signed release manually.");
+    if (!samePublisher(expected, update)) throw new Error("The Windows update does not match the pinned publisher identity.");
     return Object.freeze({
       authenticityMode: policy.authenticityMode,
       verified: true,
@@ -115,9 +138,7 @@ function verifyWindowsUpdatePublisher({
   const current = canonicalAuthenticodeSignature(currentSignature);
   const update = canonicalAuthenticodeSignature(updateSignature);
   if (!current || !update) throw new Error("The Windows update is not Authenticode-signed by a valid certificate.");
-  if (current.thumbprint !== update.thumbprint
-      || current.subject !== update.subject
-      || current.issuer !== update.issuer) {
+  if (!samePublisher(current, update)) {
     throw new Error("The Windows update is signed by a different publisher identity.");
   }
   return Object.freeze({
@@ -170,6 +191,7 @@ async function verifyDownloadedWindowsUpdate({
   downloadedFile,
   currentExecutable,
   authenticityMode,
+  trustedPublisher,
   packaged = true,
   environment = process.env,
   readSignature = readAuthenticodeSignature,
@@ -191,6 +213,7 @@ async function verifyDownloadedWindowsUpdate({
     currentSignature: await readSignature(executablePath),
     updateSignature: await readSignature(updatePath),
     authenticityMode,
+    trustedPublisher,
     packaged,
     environment,
   });

@@ -197,5 +197,5 @@ test("allows development macOS builds to update without weakening production bui
   const source = await fs.readFile(path.join(__dirname, "../../mac/scripts/install-update.sh"), "utf8");
   assert.match(source, /production:production\|development:development\|development:production/);
   assert.doesNotMatch(source, /production:development/);
-  assert.match(source, /case "\$NEW_MODE" in[\s\S]+codesign --verify --deep --strict -R="\$NEW_REQUIREMENT" "\$NEW_APP"/);
+  assert.match(source, /case "\$NEW_MODE" in[\s\S]+codesign --verify --deep --strict -R="\$CURRENT_REQUIREMENT" "\$NEW_APP"/);
 });

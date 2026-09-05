@@ -47,13 +47,13 @@ case "$MAC_UPDATE_AUTHENTICITY" in
 esac
 MAC_UPDATE_TEAM_ID="${MAC_UPDATE_TEAM_ID:-}"
 MAC_UPDATE_DESIGNATED_REQUIREMENT="${MAC_UPDATE_DESIGNATED_REQUIREMENT:-}"
-if [[ "$MAC_UPDATE_AUTHENTICITY" == "production" ]]; then
+if [[ "$MAC_UPDATE_AUTHENTICITY" == "production" || -n "$MAC_UPDATE_TEAM_ID" || -n "$MAC_UPDATE_DESIGNATED_REQUIREMENT" ]]; then
     [[ "$MAC_UPDATE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || {
-        echo "Production macOS packaging requires MAC_UPDATE_TEAM_ID." >&2
+        echo "A macOS production update pin requires MAC_UPDATE_TEAM_ID." >&2
         exit 64
     }
     [[ -n "$MAC_UPDATE_DESIGNATED_REQUIREMENT" && "$MAC_UPDATE_DESIGNATED_REQUIREMENT" != *$'\n'* && "$MAC_UPDATE_DESIGNATED_REQUIREMENT" != *$'\r'* ]] || {
-        echo "Production macOS packaging requires a single-line MAC_UPDATE_DESIGNATED_REQUIREMENT." >&2
+        echo "A macOS production update pin requires a single-line MAC_UPDATE_DESIGNATED_REQUIREMENT." >&2
         exit 64
     }
 fi
@@ -177,12 +177,13 @@ UPDATE_CONFIG_ARGS=(
   "--config.extraMetadata.resonanceUpdateAuthenticity=$MAC_UPDATE_AUTHENTICITY"
   "--config.mac.extendInfo.ResonanceUpdateAuthenticity=$MAC_UPDATE_AUTHENTICITY"
 )
-if [[ "$MAC_UPDATE_AUTHENTICITY" == "production" ]]; then
+if [[ -n "$MAC_UPDATE_TEAM_ID" ]]; then
     UPDATE_CONFIG_ARGS+=(
         "--config.mac.extendInfo.ResonanceUpdateTeamIdentifier=$MAC_UPDATE_TEAM_ID"
         "--config.mac.extendInfo.ResonanceUpdateDesignatedRequirement=$MAC_UPDATE_DESIGNATED_REQUIREMENT"
     )
-else
+fi
+if [[ "$MAC_UPDATE_AUTHENTICITY" == "development" ]]; then
     # Ordinary local/CI apps still need an ad-hoc signature so macOS can
     # validate the complete bundle after electron-builder rewrites metadata.
     UPDATE_CONFIG_ARGS+=(
@@ -244,7 +245,7 @@ if command -v unzip >/dev/null 2>&1 && command -v plutil >/dev/null 2>&1; then
         echo "The macOS Electron app has no compatibility updater policy." >&2
         exit 71
     }
-    if [[ "$MAC_UPDATE_AUTHENTICITY" == "production" ]]; then
+    if [[ -n "$MAC_UPDATE_TEAM_ID" ]]; then
         plutil -extract ResonanceUpdateTeamIdentifier raw "$APP_PLIST" | grep -Fxq "$MAC_UPDATE_TEAM_ID" || {
             echo "The packaged macOS updater Team ID does not match the requested identity." >&2
             exit 71

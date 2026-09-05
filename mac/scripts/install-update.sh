@@ -72,13 +72,16 @@ case "$NEW_MODE" in
         NEW_REQUIREMENT="$(/usr/bin/plutil -extract ResonanceUpdateDesignatedRequirement raw "$INFO_PLIST" 2>/dev/null || true)"
         [[ "$NEW_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || exit 65
         [[ -n "$NEW_REQUIREMENT" && "$NEW_REQUIREMENT" != *$'\n'* && "$NEW_REQUIREMENT" != *$'\r'* ]] || exit 65
-        if [[ "$UPDATE_AUTH_MODE" == "production" ]]; then
-            [[ "$NEW_TEAM_ID" == "$CURRENT_TEAM_ID" ]] || exit 65
-            [[ "$NEW_REQUIREMENT" == "$CURRENT_REQUIREMENT" ]] || exit 65
-        fi
+        # Even an ad-hoc installed app must already carry the independently
+        # trusted production pin. A downloaded bundle cannot nominate its own
+        # publisher; missing pins require a manual trusted installation.
+        [[ "$CURRENT_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || exit 65
+        [[ -n "$CURRENT_REQUIREMENT" && "$CURRENT_REQUIREMENT" != *$'\n'* && "$CURRENT_REQUIREMENT" != *$'\r'* ]] || exit 65
+        [[ "$NEW_TEAM_ID" == "$CURRENT_TEAM_ID" ]] || exit 65
+        [[ "$NEW_REQUIREMENT" == "$CURRENT_REQUIREMENT" ]] || exit 65
         NEW_SIGNATURE_DETAILS="$(/usr/bin/codesign --display --verbose=4 "$NEW_APP" 2>&1)" || exit 65
-        grep -Fqx "TeamIdentifier=$NEW_TEAM_ID" <<< "$NEW_SIGNATURE_DETAILS" || exit 65
-        /usr/bin/codesign --verify --deep --strict -R="$NEW_REQUIREMENT" "$NEW_APP"
+        grep -Fqx "TeamIdentifier=$CURRENT_TEAM_ID" <<< "$NEW_SIGNATURE_DETAILS" || exit 65
+        /usr/bin/codesign --verify --deep --strict -R="$CURRENT_REQUIREMENT" "$NEW_APP"
         ;;
     development)
         /usr/bin/codesign --verify --deep --strict "$NEW_APP"

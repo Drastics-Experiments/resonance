@@ -15,7 +15,19 @@ Generated artifacts are placed in `installers/windows/dist/` and are intentional
 
 The installer is per-user, supports choosing an installation directory, and creates Start Menu and Desktop shortcuts. Application data remains under Electron's per-user application-data directory and is not removed during upgrades.
 
-After the first installation, Resonance checks and downloads updates inside the app. Choosing **Restart & update** runs the verified NSIS update silently against the existing installation and relaunches Resonance; it does not show the setup wizard or ask the user to choose an installation directory again. Production-signed packages verify the update against the installed Authenticode publisher. Packages built through the explicit unsigned-desktop release option embed that policy and rely on the updater manifest checksum; they can take a subsequent explicitly unsigned update or move forward to a validly Authenticode-signed package. Signed installations never accept an unsigned downgrade.
+After the first installation, Resonance checks and downloads updates inside the app. Choosing **Restart & update** runs the verified NSIS update silently against the existing installation and relaunches Resonance; it does not show the setup wizard or ask the user to choose an installation directory again. Production-signed packages verify the update against the installed Authenticode publisher. Packages built through the explicit unsigned-desktop release option embed that policy and rely on the updater manifest checksum; they can take a subsequent explicitly unsigned update. Moving to a signed package also requires a matching production publisher pin embedded in the installed app. Signed installations never accept an unsigned downgrade.
+
+To enable that transition, the trusted build operator supplies electron-builder
+`extraMetadata.resonanceUpdatePublisher` with `subject`, `issuer`, and the
+40-hex-digit certificate `thumbprint` of the independently verified production
+publisher. Each field can be passed with
+`--config.extraMetadata.resonanceUpdatePublisher.<field>=<trusted-value>` when
+building the unsigned installer. These values must come from trusted signing
+configuration, never from the update download or its manifest. Do not commit
+signing identities or credentials. Ordinary builds without a pin still accept
+unsigned updates but reject signed transitions with a manual-install message.
+This does not independently authenticate unsigned updates against a compromised
+release feed; that would require a separately trusted update-signing mechanism.
 
 ## Download or install the latest release
 
